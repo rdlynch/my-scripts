@@ -142,8 +142,8 @@ cat > /root/.wp-secrets << 'EOF'
 # WordPress Automation Secrets
 # Keep this file secure (chmod 600)
 
-POSTMARK_TOKEN="d14208f6-13ac-4df3-9e63-6666a24dca30"
-WPVIVID_KEY="063d01eebf12184be0664791bb782df7"
+POSTMARK_TOKEN="key-here"
+WPVIVID_KEY="key-here"
 EOF
 
 chmod 600 /root/.wp-secrets
