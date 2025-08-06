@@ -3,7 +3,7 @@
 # Git-based server tools including your personal configs
 declare -A git_tools=(
     ["/opt/nG-SetEnvIf"]="https://github.com/t18d/nG-SetEnvIf.git"
-    ["/opt/server-configs"]="https://github.com/myuser/my-scripts.git"
+    ["/opt/server-configs"]="https://github.com/rdlynch/my-scripts.git"
 )
 
 for tool_path in "${!git_tools[@]}"; do
