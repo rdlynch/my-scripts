@@ -127,15 +127,15 @@ apt install certbot python3-certbot-nginx -y
 cp /opt/server-configs/wp-cron-runner.sh /root/
 cp /opt/server-configs/wp-clean-install.sh /root/
 cp /opt/server-configs/server-update.sh /root/
+cp /opt/server-configs/update-git-tools.sh /root/
 
 chmod +x /root/wp-cron-runner.sh
 chmod +x /root/wp-clean-install.sh  
 chmod +x /root/server-update.sh
+chmod +x /root/update-git-tools.sh
 
 # Add WordPress cron to system crontab (non-interactive)
 (crontab -l 2>/dev/null; echo "*/15 * * * * /root/wp-cron-runner.sh >/dev/null 2>&1") | crontab -
-
-
 
 # WordPress Plugin Keys
 cat > /root/.wp-secrets << 'EOF'
