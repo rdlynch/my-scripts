@@ -27,6 +27,19 @@ echo "Creating WordPress site: $DOMAIN"
 mkdir -p $SITE_DIR
 cd $SITE_DIR
 
+# Load secrets for API keys and licenses
+echo "Loading API configuration..."
+if [ -f /root/.wp-secrets ]; then
+    source /root/.wp-secrets
+    if [ -z "$POSTMARK_TOKEN" ] || [ -z "$WPVIVID_KEY" ]; then
+        echo "Warning: Missing API keys in /root/.wp-secrets"
+        echo "Some plugin configurations may be incomplete"
+    fi
+else
+    echo "Warning: /root/.wp-secrets not found"
+    echo "Plugin auto-configuration will be skipped"
+fi
+
 # Create database
 echo "Creating database..."
 mysql -u root -p << MYSQL_SCRIPT
@@ -85,6 +98,60 @@ wp plugin install limit-login-attempts-reloaded --activate --allow-root
 
 # Install but don't activate
 wp plugin install seo-by-rank-math --allow-root
+
+# Configure FluentSMTP for Postmark
+if [ ! -z "$POSTMARK_TOKEN" ]; then
+    echo "Configuring FluentSMTP for Postmark..."
+    
+    # Get site name for sender name
+    SITE_NAME=$(wp option get blogname --allow-root)
+    FROM_EMAIL="wordpress@${DOMAIN}"
+    
+    wp option update fluentmail_settings "{
+        \"connections\": {
+            \"postmark\": {
+                \"provider\": \"postmark\",
+                \"sender_name\": \"${SITE_NAME}\",
+                \"sender_email\": \"${FROM_EMAIL}\",
+                \"server_token\": \"${POSTMARK_TOKEN}\",
+                \"force_from_name\": \"yes\",
+                \"force_from_email\": \"yes\"
+            }
+        },
+        \"misc\": {
+            \"default_connection\": \"postmark\"
+        }
+    }" --format=json --allow-root
+    
+    echo "FluentSMTP configured with ${FROM_EMAIL}"
+else
+    echo "Skipping FluentSMTP configuration - POSTMARK_TOKEN not found"
+fi
+
+# Install and configure premium plugins
+echo "Installing premium plugins..."
+if [ -d "/opt/server-configs/premium-plugins" ]; then
+    for plugin_zip in /opt/server-configs/premium-plugins/*.zip; do
+        if [ -f "$plugin_zip" ]; then
+            plugin_name=$(basename "$plugin_zip" .zip)
+            echo "Installing ${plugin_name}..."
+            wp plugin install "$plugin_zip" --activate --allow-root
+            
+            # Configure specific premium plugins
+            case "$plugin_name" in
+                "wpvivid"*)
+                    if [ ! -z "$WPVIVID_KEY" ]; then
+                        echo "Configuring WPvivid license..."
+                        wp option update wpvivid_license_key "$WPVIVID_KEY" --allow-root
+                        echo "WPvivid license key configured"
+                    fi
+                    ;;
+            esac
+        fi
+    done
+else
+    echo "No premium plugins directory found, skipping..."
+fi
 
 # Create custom pages
 echo "Creating pages..."
