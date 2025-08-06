@@ -9,8 +9,8 @@ if [ $# -ne 1 ]; then
 fi
 
 DOMAIN=$1
-SITE_DIR="/var/www/$DOMAIN"
-DB_NAME=$(echo $DOMAIN | sed 's/\./_/g')
+SITENAME=$(echo $DOMAIN | cut -d'.' -f1)
+SITE_DIR="/var/www/$SITENAME"DB_NAME=$(echo $DOMAIN | sed 's/\./_/g')
 DB_USER=$(echo $DOMAIN | sed 's/\./_/g' | cut -c1-16)
 DB_PASS=$(openssl rand -base64 12)
 
@@ -39,6 +39,10 @@ MYSQL_SCRIPT
 echo "Downloading WordPress..."
 wp core download --allow-root
 wp core config --dbname=$DB_NAME --dbuser=$DB_USER --dbpass=$DB_PASS --allow-root
+
+# Remove default WordPress files
+echo "Cleaning default WordPress files..."
+rm -f readme.html license.txt
 
 # Add security configurations to wp-config.php
 wp config set WP_POST_REVISIONS 3 --allow-root
