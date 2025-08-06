@@ -15,10 +15,11 @@ for tool_path in "${!git_tools[@]}"; do
         # If server-configs updated, copy files to their locations
         if [[ "$tool_path" == "/opt/server-configs" ]]; then
             echo "Updating server configuration files..."
-            cp /opt/server-configs/wp-clean-install.sh /root/
             cp /opt/server-configs/wp-cron-runner.sh /root/
-            cp /opt/server-configs/server-update.sh /root/
-            chmod +x /root/wp-clean-install.sh /root/wp-cron-runner.sh /root/server-update.sh
+cp /opt/server-configs/wp-clean-install.sh /root/
+cp /opt/server-configs/server-update.sh /root/
+cp /opt/server-configs/update-git-tools.sh /root/  # ADD THIS LINE
+chmod +x /root/wp-clean-install.sh /root/wp-cron-runner.sh /root/server-update.sh /root/update-git-tools.sh
             
             # Update system configs if they changed
             cp /opt/server-configs/jail.local /etc/fail2ban/jail.local
