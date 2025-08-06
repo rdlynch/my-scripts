@@ -88,12 +88,21 @@ echo "Installing themes..."
 wp theme install generatepress --activate --allow-root
 wp theme install twentytwentyfive --allow-root
 
-# Strip out Gutenberg and force Classic Editor
-echo "Removing Gutenberg blocks..."
+# Install and activate required plugins
+echo "Installing and activating plugins..."
+wp plugin install fluent-smtp --activate --allow-root
+wp plugin install fluentform --activate --allow-root
 wp plugin install classic-editor --activate --allow-root
 wp plugin install disable-gutenberg --activate --allow-root
+wp plugin install tinymce-advanced --activate --allow-root
+
+# Install but don't activate
+wp plugin install seo-by-rank-math --allow-root
+wp plugin install ninjafirewall --allow-root
+wp plugin install limit-login-attempts-reloaded --allow-root
 
 # Configure Classic Editor to completely override Gutenberg
+echo "Configuring Classic Editor..."
 wp option update classic-editor-replace 'replace' --allow-root
 wp option update classic-editor-allow-users 'disallow' --allow-root
 
@@ -104,18 +113,6 @@ wp option update use_block_editor_for_post_type_page 0 --allow-root
 # Disable theme support for Gutenberg
 wp theme mod remove editor-color-palette --allow-root
 wp theme mod remove editor-font-sizes --allow-root
-
-# Install and activate required plugins
-echo "Installing and activating plugins..."
-wp plugin install fluent-smtp --activate --allow-root
-wp plugin install fluentform --activate --allow-root
-wp plugin install tinymce-advanced --activate --allow-root
-
-# Install but don't activate
-wp plugin install seo-by-rank-math --allow-root
-wp plugin install ninjafirewall --allow-root
-wp plugin install limit-login-attempts-reloaded --allow-root
-
 
 # Configure FluentSMTP for Postmark
 if [ ! -z "$POSTMARK_TOKEN" ]; then
