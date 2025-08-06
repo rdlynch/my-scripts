@@ -10,7 +10,8 @@ fi
 
 DOMAIN=$1
 SITENAME=$(echo $DOMAIN | cut -d'.' -f1)
-SITE_DIR="/var/www/$SITENAME"DB_NAME=$(echo $DOMAIN | sed 's/\./_/g')
+SITE_DIR="/var/www/$SITENAME"
+DB_NAME=$(echo $DOMAIN | sed 's/\./_/g')
 DB_USER=$(echo $DOMAIN | sed 's/\./_/g' | cut -c1-16)
 DB_PASS=$(openssl rand -base64 12)
 
@@ -48,6 +49,7 @@ rm -f readme.html license.txt
 wp config set WP_POST_REVISIONS 3 --allow-root
 wp config set DISALLOW_FILE_EDIT true --allow-root
 wp config set WP_AUTO_UPDATE_CORE minor --allow-root
+wp config set DISABLE_WP_CRON true --allow-root
 
 # Install WordPress
 echo "Installing WordPress..."
