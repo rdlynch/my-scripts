@@ -11,4 +11,3 @@ fi
 systemctl restart nginx php8.3-fpm mariadb
 
 echo "Maintenance completed: $(date)"
-EOF
