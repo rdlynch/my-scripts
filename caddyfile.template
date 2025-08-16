@@ -3,8 +3,8 @@
 
 # Global options
 {
-    # Email for Let's Encrypt notifications - UPDATE THIS
-    email admin@yourdomain.com
+    # Email for Let's Encrypt notifications
+    email rlynch@aostrategies.com
     
     # Enable admin API for management
     admin localhost:2019
