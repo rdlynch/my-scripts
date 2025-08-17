@@ -41,16 +41,17 @@ if [ "$TYPE" = "grav" ]; then
     echo "Copying Grav template with Hadron theme..."
     cp -r /opt/templates/grav-template "$SITEDIR"
     
+    # Set proper permissions 
+    chown -R www-data:www-data "$SITEDIR"
+    chmod -R 755 "$SITEDIR"
+    chmod -R 775 "$SITEDIR"/{cache,logs,tmp,backup,user}
+    
     # Install Hadron theme
     cd "$SITEDIR"
     sudo -u www-data php bin/gpm install hadron -y
     
     # Set Hadron as the default theme
     sudo -u www-data sed -i "s/theme: .*/theme: hadron/" user/config/system.yaml
-    
-    # Set proper permissions
-    chown -R www-data:www-data "$SITEDIR"
-    chmod -R 755 "$SITEDIR"
     
     # Clear any existing cache/logs
     rm -rf "$SITEDIR"/{cache,logs,tmp,backup}/*
