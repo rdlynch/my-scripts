@@ -131,42 +131,18 @@ echo "------------------------------------"
 
 # Create directory structure
 echo "Creating directory structure..."
-mkdir -p /var/www /var/backups/sites /var/backups/server /var/log/forms /opt/templates
+mkdir -p /var/www /var/backups/sites /var/backups/server /var/log/forms
 echo "SUCCESS: Directory structure created"
 
-# Download and setup Grav CMS (core version, no admin)
-echo "Installing Grav CMS core..."
+# Download and setup Grav CMS (core version, no admin) for default site
+echo "Installing Grav CMS core for default site..."
 cd /tmp
 wget https://getgrav.org/download/core/grav/latest -O grav-core.zip
 unzip grav-core.zip
 mv grav /var/www/cms
+rm grav-core.zip
 chown -R www-data:www-data /var/www/cms
 chmod -R 755 /var/www/cms
-
-# Install essential Grav plugins (no admin)
-echo "Installing Grav plugins..."
-cd /var/www/cms
-sudo -u www-data php bin/gpm install form -y
-sudo -u www-data php bin/gpm install email -y
-sudo -u www-data php bin/gpm install email-postmark -y
-echo "SUCCESS: Grav CMS and plugins installed"
-
-# Create templates
-echo "Setting up site templates..."
-
-# Hugo template with Clarity theme
-cd /opt/templates
-hugo new site hugo-template
-cd hugo-template
-git init
-git submodule add https://github.com/chipzoller/hugo-clarity themes/clarity
-cp themes/clarity/exampleSite/config/_default/* config/_default/ 2>/dev/null || true
-
-# Grav template (clean copy)
-cp -r /var/www/cms /opt/templates/grav-template
-cd /opt/templates/grav-template
-rm -rf logs/* cache/* tmp/* backup/* 2>/dev/null || true
-echo "SUCCESS: Site templates created"
 
 # Phase 6: Form Handler and Management Scripts
 echo ""
