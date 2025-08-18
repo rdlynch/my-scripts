@@ -255,12 +255,6 @@ chmod -R 755 /var/www
 chmod 644 /var/www/form-handler.php
 echo "SUCCESS: Permissions set correctly"
 
-# Copy config files to /opt for easy access
-echo "Setting up configuration access..."
-mkdir -p /opt/server-configs
-cp -r "$SCRIPT_DIR"/* /opt/server-configs/
-echo "SUCCESS: Configuration files accessible at /opt/server-configs"
-
 # Final status check
 echo ""
 echo "Verifying installation..."
@@ -313,7 +307,7 @@ echo "   4. SSL certificates will generate automatically"
 echo ""
 echo "FILE LOCATIONS:"
 echo "   - Sites: /var/www/"
-echo "   - Configs: /opt/server-configs/"
+echo "   - Scripts: /root/my-scripts/"
 echo "   - Logs: /var/log/"
 echo "   - Backups: /var/backups/sites/"
 echo ""
