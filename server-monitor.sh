@@ -158,6 +158,28 @@ if [ "$CURRENT_HOUR" = "03" ] && [ "$CURRENT_MINUTE" -lt "15" ]; then
     log_message "INFO: Checking for available updates"
     
     # Check for package updates
+    UPDATE_COUNT=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo "1")
+    if [ "$UPDATE_COUNT" -gt 1 ]; then  # Subtract 1 for header line
+        ACTUAL_UPDATES=$((UPDATE_COUNT - 1))
+        log_message "INFO: $ACTUAL_UPDATES package updates available"
+    fi
+    
+    # Check Hugo version
+    if command -v hugo >/dev/null 2>&1; then
+        CURRENT_HUGO=$(hugo version 2>/dev/null | grep -o 'v[0-9.]*' | head -1 | sed 's/v//')
+        LATEST_HUGO=$(curl -s https://api.github.com/repos/gohugoio/hugo/releases/latest | grep "tag_name" | cut -d '"' -f 4 | sed 's/v//' 2>/dev/null || echo "unknown")
+        
+        if [ "$CURRENT_HUGO" != "$LATEST_HUGO" ] && [ "$LATEST_HUGO" != "unknown" ]; then
+            log_message "INFO: Hugo update available: $CURRENT_HUGO -> $LATEST_HUGO"
+        fi
+    fi
+fi
+
+# Check available updates (once per day at 03:00)
+if [ "$CURRENT_HOUR" = "03" ] && [ "$CURRENT_MINUTE" -lt "15" ]; then
+    log_message "INFO: Checking for available updates"
+    
+    # Check for package updates
     apt list --upgradable 2>/dev/null | grep -c upgradable | while read UPDATE_COUNT; do
         if [ "$UPDATE_COUNT" -gt 1 ]; then  # Subtract 1 for header line
             ACTUAL_UPDATES=$((UPDATE_COUNT - 1))
