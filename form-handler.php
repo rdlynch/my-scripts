@@ -32,6 +32,14 @@ if (file_exists('/root/.form-secrets')) {
     $config = array_merge($config, $secrets);
 }
 
+// Validate configuration
+if (empty($config['postmark_token']) && empty($config['b2_key_id'])) {
+    error_log('Form handler: No API credentials configured');
+    http_response_code(503);
+    echo json_encode(['success' => false, 'message' => 'Service temporarily unavailable']);
+    exit;
+}
+
 /**
  * Sanitize input data
  */
