@@ -132,35 +132,21 @@ if [ "$FAIL2BAN_STATUS" = "active" ]; then
 fi
 
 # Check certificate expiration for sites (once per day at 02:00)
-if command -v openssl >/dev/null 2>&1; then
-    while read -r DOMAIN; do
-        if [ -n "$DOMAIN" ]; then
-            DAYS_LEFT=$(echo | timeout 10 openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -checkend $((30*86400)) 2>/dev/null && echo "OK" || echo "EXPIRING")
-            if [ "$DAYS_LEFT" = "EXPIRING" ]; then
-                log_message "ALERT: SSL certificate for $DOMAIN expires within 30 days"
-            fi
-        fi
-    done < <(grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,} {" /etc/caddy/Caddyfile | awk '{print $1}')
-fi    
+CURRENT_HOUR=$(date +%H)
+CURRENT_MINUTE=$(date +%M)
+if [ "$CURRENT_HOUR" = "02" ] && [ "$CURRENT_MINUTE" -lt "15" ]; then
+    log_message "INFO: Starting daily SSL certificate check"
     
     # Get all domains from Caddyfile
-    if [ -f "/etc/caddy/Caddyfile" ]; then
+    if [ -f "/etc/caddy/Caddyfile" ] && command -v openssl >/dev/null 2>&1; then
         grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,} {" /etc/caddy/Caddyfile | awk '{print $1}' | while read DOMAIN; do
             if [ -n "$DOMAIN" ]; then
-                # Check certificate expiration (30 days warning)
-                CERT_DAYS=$(echo | openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null | grep notAfter | cut -d= -f2 | xargs -I {} date -d "{}" +%s 2>/dev/null || echo "0")
-                CURRENT_EPOCH=$(date +%s)
+                # Simple certificate check (30 days warning)
+                CERT_STATUS=$(echo | timeout 10 openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -checkend $((30*86400)) 2>/dev/null && echo "OK" || echo "EXPIRING")
                 
-                if [ "$CERT_DAYS" -gt 0 ]; then
-                    DAYS_UNTIL_EXPIRY=$(( (CERT_DAYS - CURRENT_EPOCH) / 86400 ))
-                    
-                    if [ "$DAYS_UNTIL_EXPIRY" -lt 30 ] && [ "$DAYS_UNTIL_EXPIRY" -gt 0 ]; then
-                        log_message "ALERT: SSL certificate for $DOMAIN expires in $DAYS_UNTIL_EXPIRY days"
-                        ALERTS_TRIGGERED=true
-                    elif [ "$DAYS_UNTIL_EXPIRY" -le 0 ]; then
-                        log_message "ALERT: SSL certificate for $DOMAIN has EXPIRED"
-                        ALERTS_TRIGGERED=true
-                    fi
+                if [ "$CERT_STATUS" = "EXPIRING" ]; then
+                    log_message "ALERT: SSL certificate for $DOMAIN expires within 30 days"
+                    ALERTS_TRIGGERED=true
                 fi
             fi
         done
