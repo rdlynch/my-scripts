@@ -44,10 +44,10 @@ for SITE_PATH in /var/www/*/; do
         # Create compressed archive
         if tar -czf "$CURRENT_BACKUP/${SITENAME}.tar.gz" -C "/var/www" "$SITENAME" 2>/dev/null; then
             SITE_SIZE=$(du -h "$CURRENT_BACKUP/${SITENAME}.tar.gz" | cut -f1)
-            log_message "  ✓ $SITENAME backed up successfully ($SITE_SIZE)"
+            log_message "  SUCCESS: $SITENAME backed up successfully ($SITE_SIZE)"
             ((SITE_COUNT++))
         else
-            log_message "  ✗ Failed to backup $SITENAME"
+            log_message "  ERROR: Failed to backup $SITENAME"
             BACKUP_SUCCESS=false
         fi
     fi
@@ -56,18 +56,18 @@ done
 # Backup Caddy configuration
 log_message "Backing up Caddy configuration..."
 if cp /etc/caddy/Caddyfile "$CURRENT_BACKUP/" 2>/dev/null; then
-    log_message "  ✓ Caddyfile backed up successfully"
+    log_message "  SUCCESS: Caddyfile backed up successfully"
 else
-    log_message "  ✗ Failed to backup Caddyfile"
+    log_message "  ERROR: Failed to backup Caddyfile"
     BACKUP_SUCCESS=false
 fi
 
 # Backup form handler
 log_message "Backing up form handler..."
 if cp /var/www/form-handler.php "$CURRENT_BACKUP/" 2>/dev/null; then
-    log_message "  ✓ Form handler backed up successfully"
+    log_message "  SUCCESS: Form handler backed up successfully"
 else
-    log_message "  ✗ Failed to backup form handler"
+    log_message "  ERROR: Failed to backup form handler"
     BACKUP_SUCCESS=false
 fi
 
@@ -82,17 +82,24 @@ CONFIG_FILES=(
     "/etc/fail2ban/filter.d/caddy-auth.conf"
     "/etc/logrotate.d/caddy-sites"
     "/root/.form-secrets"
-    "/etc/php/8.2/fpm/php.ini"
 )
+
+# Dynamic PHP configuration backup
+PHP_INI_PATH=$(find /etc/php -name "php.ini" -path "*/fpm/*" | head -1)
+if [ -n "$PHP_INI_PATH" ]; then
+    CONFIG_FILES+=("$PHP_INI_PATH")
+fi
 
 for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
     if [ -f "$CONFIG_FILE" ]; then
         BASENAME=$(basename "$CONFIG_FILE")
         if cp "$CONFIG_FILE" "$CONFIG_BACKUP/$BASENAME" 2>/dev/null; then
-            log_message "  ✓ $BASENAME backed up"
+            log_message "  SUCCESS: $BASENAME backed up"
         else
-            log_message "  ✗ Failed to backup $BASENAME"
+            log_message "  ERROR: Failed to backup $BASENAME"
         fi
+    else
+        log_message "  WARNING: $CONFIG_FILE not found"
     fi
 done
 
@@ -105,7 +112,7 @@ if [ -d "/var/log/forms" ]; then
     # Find and copy logs from last 30 days
     find /var/log/forms -name "*.log" -mtime -30 -exec cp --parents {} "$LOGS_BACKUP/" \; 2>/dev/null || true
     LOG_COUNT=$(find "$LOGS_BACKUP" -name "*.log" | wc -l)
-    log_message "  ✓ $LOG_COUNT recent form log files backed up"
+    log_message "  SUCCESS: $LOG_COUNT recent form log files backed up"
 fi
 
 # Create backup manifest
@@ -132,10 +139,10 @@ REMOVED_COUNT=0
 
 find "$BACKUP_DIR" -maxdepth 1 -type d -mtime +$KEEP_DAYS -name "20*" | while read OLD_BACKUP; do
     if rm -rf "$OLD_BACKUP" 2>/dev/null; then
-        log_message "  ✓ Removed old backup: $(basename "$OLD_BACKUP")"
+        log_message "  SUCCESS: Removed old backup: $(basename "$OLD_BACKUP")"
         ((REMOVED_COUNT++))
     else
-        log_message "  ✗ Failed to remove: $(basename "$OLD_BACKUP")"
+        log_message "  ERROR: Failed to remove: $(basename "$OLD_BACKUP")"
     fi
 done
 
