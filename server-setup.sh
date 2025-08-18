@@ -149,7 +149,6 @@ cd /var/www/cms
 sudo -u www-data php bin/gpm install form -y
 sudo -u www-data php bin/gpm install email -y
 sudo -u www-data php bin/gpm install email-postmark -y
-sudo -u www-data php bin/gpm install table-importer -y
 echo "SUCCESS: Grav CMS and plugins installed"
 
 # Create templates
@@ -162,7 +161,6 @@ cd hugo-template
 git init
 git submodule add https://github.com/chipzoller/hugo-clarity themes/clarity
 cp themes/clarity/exampleSite/config/_default/* config/_default/ 2>/dev/null || true
-hugo
 
 # Grav template (clean copy)
 cp -r /var/www/cms /opt/templates/grav-template
