@@ -115,7 +115,6 @@ chmod -R 755 /var/www/cms
 # Install Grav plugins
 echo "Installing Grav plugins..."
 cd /var/www/cms
-sudo -u www-data php bin/gpm install admin -y
 sudo -u www-data php bin/gpm install form -y
 sudo -u www-data php bin/gpm install email -y
 sudo -u www-data php bin/gpm install postmark -y
