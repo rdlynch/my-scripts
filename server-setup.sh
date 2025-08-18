@@ -22,7 +22,7 @@ echo "Running from: $SCRIPT_DIR"
 echo ""
 echo "Phase 1: System Updates and Basic Packages"
 echo "-------------------------------------------"
-apt update && apt upgrade -y && apt autoremove -y && apt autoclean
+apt update && apt upgrade -y
 
 # Set timezone
 timedatectl set-timezone America/Chicago
@@ -227,7 +227,7 @@ echo "SUCCESS: Log rotation configured"
 echo "Installing automated tasks..."
 (crontab -l 2>/dev/null; echo "0 2 * * * /root/backup-sites.sh >/dev/null 2>&1") | crontab -
 (crontab -l 2>/dev/null; echo "*/15 * * * * /root/server-monitor.sh >/dev/null 2>&1") | crontab -
-(crontab -l 2>/dev/null; echo "0 4 * * 0 /root/update-server.sh >/dev/null 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "0 4 * * 0 /root/server-update.sh >/dev/null 2>&1") | crontab -
 echo "SUCCESS: Automated tasks scheduled"
 
 # Set up bash aliases
@@ -273,6 +273,9 @@ FAIL2BAN_STATUS=$(systemctl is-active fail2ban)
 echo "STATUS: Caddy: $CADDY_STATUS"
 echo "STATUS: PHP-FPM: $PHP_STATUS"
 echo "STATUS: Fail2Ban: $FAIL2BAN_STATUS"
+
+# Server cleanup
+apt autoremove -y && apt autoclean
 
 # Get server IP for final instructions
 SERVER_IP=$(curl -s http://ipv4.icanhazip.com/ || echo "YOUR-SERVER-IP")
