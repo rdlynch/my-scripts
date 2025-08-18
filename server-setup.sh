@@ -22,8 +22,6 @@ echo "Running from: $SCRIPT_DIR"
 echo ""
 echo "Phase 1: System Updates and Basic Packages"
 echo "-------------------------------------------"
-apt update && apt upgrade -y
-
 # Set timezone
 timedatectl set-timezone America/Chicago
 echo "SUCCESS: Timezone set to America/Chicago"
