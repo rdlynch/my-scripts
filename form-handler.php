@@ -54,6 +54,21 @@ function isValidEmail($email) {
     return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
 }
 
+// Basic rate limiting
+$ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+$rate_file = $config['log_dir'] . '/rate_limit_' . md5($ip);
+$current_time = time();
+
+if (file_exists($rate_file)) {
+    $last_submission = (int)file_get_contents($rate_file);
+    if ($current_time - $last_submission < 60) { // 1 minute between submissions
+        http_response_code(429);
+        echo json_encode(['success' => false, 'message' => 'Please wait before submitting again']);
+        exit;
+    }
+}
+file_put_contents($rate_file, $current_time);
+
 /**
  * Log form submission
  */
