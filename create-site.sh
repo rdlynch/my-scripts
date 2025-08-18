@@ -33,6 +33,35 @@ if [[ ! "$TYPE" =~ ^(grav|hugo)$ ]]; then
     exit 1
 fi
 
+# Cleanup function for failed installations
+cleanup_failed_site() {
+    echo "Cleaning up failed installation..."
+    
+    # Remove site directory if it exists
+    if [ -d "$SITEDIR" ]; then
+        rm -rf "$SITEDIR"
+        echo "Removed site directory: $SITEDIR"
+    fi
+    
+    # Remove Caddy configuration block if it was added
+    if grep -q "# $DOMAIN" /etc/caddy/Caddyfile 2>/dev/null; then
+        echo "Removing Caddy configuration..."
+        head -n -$(($(grep -n "# $DOMAIN" /etc/caddy/Caddyfile | tail -1 | cut -d: -f1) - 1)) /etc/caddy/Caddyfile > /tmp/caddyfile.tmp
+        mv /tmp/caddyfile.tmp /etc/caddy/Caddyfile
+    fi
+    
+    # Clean up temporary files
+    cd /tmp
+    rm -f grav-core.zip
+    rm -rf grav
+    
+    echo "Cleanup completed"
+    exit 1
+}
+
+# Set trap to run cleanup on script failure
+trap cleanup_failed_site ERR
+
 echo "Creating $TYPE site for $DOMAIN..."
 echo "Site directory: $SITEDIR"
 
@@ -41,27 +70,49 @@ if [ "$TYPE" = "grav" ]; then
     
     # Download and install Grav directly
     cd /tmp
-    wget https://getgrav.org/download/core/grav/latest -O grav-core.zip
-    unzip grav-core.zip
-    mv grav "$SITEDIR"
+    if ! wget https://getgrav.org/download/core/grav/latest -O grav-core.zip; then
+        echo "ERROR: Failed to download Grav"
+        exit 1
+    fi
+    
+    if ! unzip -q grav-core.zip; then
+        echo "ERROR: Failed to extract Grav archive"
+        rm -f grav-core.zip
+        exit 1
+    fi
+    
+    if ! mv grav "$SITEDIR"; then
+        echo "ERROR: Failed to move Grav to site directory"
+        rm -rf grav grav-core.zip
+        exit 1
+    fi
+    
     rm grav-core.zip
+    echo "SUCCESS: Grav core installed"
     
     # Set proper permissions 
     chown -R www-data:www-data "$SITEDIR"
     chmod -R 755 "$SITEDIR"
     chmod -R 775 "$SITEDIR"/{cache,logs,tmp,backup,user}
+    echo "SUCCESS: Permissions set"
     
-    # Install required plugins
+    # Install Hadron theme
+    echo "Installing Hadron theme..."
     cd "$SITEDIR"
-    sudo -u www-data php bin/gpm install form -y
-    sudo -u www-data php bin/gpm install email -y
-    sudo -u www-data php bin/gpm install email-postmark -y
-    sudo -u www-data php bin/gpm install hadron -y
+    if ! sudo -u www-data php bin/gpm install hadron -y; then
+        echo "ERROR: Failed to install Hadron theme"
+        exit 1
+    fi
     
     # Set Hadron as the default theme
-    sudo -u www-data sed -i "s/theme: .*/theme: hadron/" user/config/system.yaml
+    if ! sudo -u www-data sed -i "s/theme: .*/theme: hadron/" user/config/system.yaml; then
+        echo "ERROR: Failed to set Hadron as default theme"
+        exit 1
+    fi
+    echo "SUCCESS: Hadron theme installed and activated"
     
     # Create site configuration
+    echo "Creating site configuration..."
     cat > "$SITEDIR/user/config/site.yaml" << EOL
 title: '$DOMAIN'
 author:
@@ -94,8 +145,10 @@ debugger:
   shutdown:
     close_connection: true
 EOL
+    echo "SUCCESS: Site configuration created"
 
     # Add site configuration to Caddyfile
+    echo "Adding Caddy configuration..."
     cat >> /etc/caddy/Caddyfile << EOL
 
 # $DOMAIN - Grav CMS Site with Hadron Theme
@@ -133,36 +186,59 @@ $DOMAIN {
 EOL
 
     echo "Grav site with Hadron theme created successfully!"
+    echo "Edit content in: $SITEDIR/user/pages/"
+    echo "Form handler available at: https://$DOMAIN/form-handler.php"
 
 elif [ "$TYPE" = "hugo" ]; then
     echo "Creating fresh Hugo site..."
     
     # Create new Hugo site
-    hugo new site "$SITEDIR"
+    if ! hugo new site "$SITEDIR"; then
+        echo "ERROR: Failed to create Hugo site"
+        exit 1
+    fi
+    
     cd "$SITEDIR"
+    echo "SUCCESS: Hugo site structure created"
     
     # Install Clarity theme
-    git init
-    git submodule add https://github.com/chipzoller/hugo-clarity themes/clarity
+    echo "Installing Clarity theme..."
+    if ! git init; then
+        echo "ERROR: Failed to initialize git repository"
+        exit 1
+    fi
+    
+    if ! git submodule add https://github.com/chipzoller/hugo-clarity themes/clarity; then
+        echo "ERROR: Failed to install Clarity theme"
+        exit 1
+    fi
     
     # Copy example config if it exists
     if [ -d "themes/clarity/exampleSite/config" ]; then
         cp -r themes/clarity/exampleSite/config/* config/ 2>/dev/null || true
+        echo "SUCCESS: Copied example configuration"
     fi
     
     # Set proper permissions
     chown -R www-data:www-data "$SITEDIR"
     chmod -R 755 "$SITEDIR"
+    echo "SUCCESS: Permissions set"
     
     # Update config for this domain
+    echo "Configuring site for $DOMAIN..."
     sed -i "s|baseURL = .*|baseURL = 'https://$DOMAIN'|" config/_default/config.yaml 2>/dev/null || true
     sed -i "s|title = .*|title = '$DOMAIN'|" config/_default/config.yaml 2>/dev/null || true
     
     # Build the site
     echo "Building Hugo site..."
-    hugo --minify
+    if ! hugo --minify; then
+        echo "ERROR: Failed to build Hugo site"
+        exit 1
+    fi
+    echo "SUCCESS: Hugo site built"
     
     # Add site configuration to Caddyfile
+    echo "Adding Caddy configuration..."
     cat >> /etc/caddy/Caddyfile << EOL
 
 # $DOMAIN - Hugo Static Site with Clarity Theme
@@ -202,6 +278,7 @@ EOL
     echo "Hugo site with Clarity theme created successfully!"
     echo "Edit content in: $SITEDIR/content/"
     echo "Rebuild with: cd $SITEDIR && hugo --minify"
+    echo "Form handler available at: https://$DOMAIN/form-handler.php"
 fi
 
 # Test Caddy configuration
@@ -210,13 +287,16 @@ if caddy validate --config /etc/caddy/Caddyfile; then
     echo "Configuration valid. Reloading Caddy..."
     caddy reload --config /etc/caddy/Caddyfile
 else
-    echo "Error: Caddy configuration is invalid!"
+    echo "ERROR: Caddy configuration is invalid!"
     echo "Removing the added configuration..."
     # Remove the last site block we just added
     head -n -$(($(grep -n "# $DOMAIN" /etc/caddy/Caddyfile | tail -1 | cut -d: -f1) - 1)) /etc/caddy/Caddyfile > /tmp/caddyfile.tmp
     mv /tmp/caddyfile.tmp /etc/caddy/Caddyfile
     exit 1
 fi
+
+# Clear the trap since we succeeded
+trap - ERR
 
 echo ""
 echo "========================================="
