@@ -28,10 +28,10 @@ apt update && apt upgrade -y
 timedatectl set-timezone America/Chicago
 echo "SUCCESS: Timezone set to America/Chicago"
 
-# Create swap file (8GB for 4GB RAM system)
-echo "Creating 8GB swap file..."
+# Create swap file
+echo "Creating 4GB swap file..."
 if [ ! -f /swapfile ]; then
-    fallocate -l 8G /swapfile
+    fallocate -l 4G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile
     swapon /swapfile
@@ -100,7 +100,7 @@ echo "Optimizing PHP configuration..."
 PHP_INI="/etc/php/8.2/fpm/php.ini"
 sed -i 's/upload_max_filesize = 2M/upload_max_filesize = 5M/' "$PHP_INI"
 sed -i 's/post_max_size = 8M/post_max_size = 6M/' "$PHP_INI"
-sed -i 's/memory_limit = 128M/memory_limit = 256M/' "$PHP_INI"
+sed -i 's/memory_limit = 128M/memory_limit = 192M/' "$PHP_INI"  # Instead of 256M
 sed -i 's/max_execution_time = 30/max_execution_time = 300/' "$PHP_INI"
 sed -i 's/max_input_vars = 1000/max_input_vars = 3000/' "$PHP_INI"
 sed -i 's/;opcache.enable=1/opcache.enable=1/' "$PHP_INI"
