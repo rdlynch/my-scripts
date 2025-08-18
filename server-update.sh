@@ -4,7 +4,7 @@ echo "Updating server packages..."
 apt update && apt upgrade -y && apt autoremove -y && apt autoclean
 
 echo "Updating configuration files from GitHub..."
-cd /opt/server-configs
+cd /root/my-scripts
 git pull origin main
 
 # Check if any config files were updated and apply them
