@@ -72,7 +72,19 @@ summary:
   size: 300
 blog:
   route: '/blog'
-debugger:
+accessibility:
+  enabled: true
+  skip_links: true
+  high_contrast: false
+cache:
+  enabled: true
+  check:
+    method: file
+twig:
+  cache: true
+  debug: false
+  auto_reload: false
+  debugger:
   enabled: false
   shutdown:
     close_connection: true
