@@ -11,7 +11,7 @@ if [ $# -lt 1 ]; then
     echo "Example: $0 mysite.com grav"
     echo ""
     echo "Available types:"
-    echo "  grav  - Grav CMS with Hadron theme and admin panel"
+    echo "  grav  - Grav CMS with Hadron theme (no admin panel)"
     echo "  hugo  - Hugo static site with Clarity theme"
     exit 1
 fi
@@ -111,17 +111,7 @@ $DOMAIN {
     @static {
         path *.css *.js *.png *.jpg *.jpeg *.gif *.svg *.woff *.woff2 *.ico
     }
-    header @static Cache-Control "public, max-age=31536000"
-    
-    # Admin panel - no caching
-    @admin {
-        path /admin/* /admin
-    }
-    header @admin {
-        Cache-Control "no-cache, no-store, must-revalidate"
-        Pragma "no-cache"
-        Expires "0"
-    }
+    header @static Cache-Control "public, max-age=31536000"    
 }
 EOL
 
