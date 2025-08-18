@@ -132,10 +132,16 @@ if [ "$FAIL2BAN_STATUS" = "active" ]; then
 fi
 
 # Check certificate expiration for sites (once per day at 02:00)
-CURRENT_HOUR=$(date +%H)
-CURRENT_MINUTE=$(date +%M)
-if [ "$CURRENT_HOUR" = "02" ] && [ "$CURRENT_MINUTE" -lt "15" ]; then
-    log_message "INFO: Starting daily SSL certificate check"
+if command -v openssl >/dev/null 2>&1; then
+    while read -r DOMAIN; do
+        if [ -n "$DOMAIN" ]; then
+            DAYS_LEFT=$(echo | timeout 10 openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -checkend $((30*86400)) 2>/dev/null && echo "OK" || echo "EXPIRING")
+            if [ "$DAYS_LEFT" = "EXPIRING" ]; then
+                log_message "ALERT: SSL certificate for $DOMAIN expires within 30 days"
+            fi
+        fi
+    done < <(grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,} {" /etc/caddy/Caddyfile | awk '{print $1}')
+fi    
     
     # Get all domains from Caddyfile
     if [ -f "/etc/caddy/Caddyfile" ]; then
