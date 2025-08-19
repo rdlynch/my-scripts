@@ -1,296 +1,266 @@
 #!/bin/bash
-
-# Automated Debian 12 Server Setup
-# Caddy + Grav CMS + Hugo + PHP Form Handler
-# For Alpha Omega Strategies
-# 
+# Debian 12 production setup for Caddy + PHP-FPM + Grav/Hugo hosting
 # Usage: ./server-setup.sh
-# Run from the cloned GitHub repo directory
 
-set -e  # Exit on any error
+set -euo pipefail
+trap 'echo "ERROR: Setup failed at line $LINENO"; exit 1' ERR
 
-echo "========================================="
-echo "Alpha Omega Strategies Server Setup"
-echo "Debian 12 + Caddy + Grav + Hugo Stack"
-echo "========================================="
+AOS_REPO_DIR="/opt/server-scripts"
+AOS_LOG="/var/log/aos-setup.log"
+AOS_TIMEZONE="America/Chicago"
 
-# Get the script directory (where this script is located)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "Running from: $SCRIPT_DIR"
+SITES_DIR="/var/www"
+BACKUP_DIR="/var/backups/sites"
+FORM_LOG_DIR="/var/log/forms"
+SCRIPT_BIN_DIR="/usr/local/sbin"
+WWW_USER="www-data"
+WWW_GROUP="www-data"
 
-# Phase 1: System Updates and Basic Packages
-echo ""
-echo "Phase 1: System Updates and Basic Packages"
-echo "-------------------------------------------"
-# Set timezone
-timedatectl set-timezone America/Chicago
-echo "SUCCESS: Timezone set to America/Chicago"
+CREATE_SWAP="yes"
+SWAP_FILE="/swapfile"
+SWAP_SIZE="4G"
 
-# Create swap file
-echo "Creating 4GB swap file..."
-if [ ! -f /swapfile ]; then
-    fallocate -l 4G /swapfile
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
-    echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    echo "SUCCESS: Swap file created and activated"
+ENABLE_UFW="yes"
+SSH_PORT="${SSH_PORT:-22}"
+
+log() { echo "$(date -Is) $*" | tee -a "$AOS_LOG" ; }
+ensure_dir() { install -d -m "$2" "$1"; }
+file_has_line() { grep -qsF "$2" "$1"; }
+
+require_root() { [[ $EUID -eq 0 ]] || { echo "Please run as root" >&2; exit 1; }; }
+require_path() { [[ -d "$AOS_REPO_DIR" ]] || { echo "Repository not found at $AOS_REPO_DIR" >&2; exit 1; }; }
+
+require_root
+require_path
+ensure_dir "$(dirname "$AOS_LOG")" 755
+: > "$AOS_LOG"
+
+log "Alpha Omega Strategies server setup starting"
+
+export DEBIAN_FRONTEND=noninteractive
+log "Setting timezone to $AOS_TIMEZONE"
+timedatectl set-timezone "$AOS_TIMEZONE" || true
+systemctl enable --now systemd-timesyncd.service
+
+log "apt update and base packages"
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  ca-certificates curl wget unzip tar gnupg ufw fail2ban \
+  software-properties-common apt-transport-https lsb-release \
+  unattended-upgrades logrotate jq zip bzip2 rsync \
+  php8.2-cli php8.2-fpm php8.2-curl php8.2-xml php8.2-zip php8.2-mbstring \
+  php8.2-gd php8.2-intl php8.2-bcmath php8.2-opcache php-apcu
+
+# Optional but beneficial for Grav if available
+if apt-cache show php8.2-yaml >/dev/null 2>&1; then
+  apt-get install -y --no-install-recommends php8.2-yaml
+elif apt-cache show php-yaml >/dev/null 2>&1; then
+  apt-get install -y --no-install-recommends php-yaml
 else
-    echo "SUCCESS: Swap file already exists"
+  log "YAML PHP extension not available in repos, continuing without it"
+fi
+phpenmod apcu || true
+echo "apc.enable_cli=1" > /etc/php/8.2/cli/conf.d/20-apcu.ini
+
+if [[ "$CREATE_SWAP" == "yes" ]]; then
+  if [[ ! -f "$SWAP_FILE" ]]; then
+    log "Creating swap $SWAP_FILE $SWAP_SIZE"
+    fallocate -l "$SWAP_SIZE" "$SWAP_FILE"
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE"
+    swapon "$SWAP_FILE"
+    echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    printf "vm.swappiness=10\nvm.vfs_cache_pressure=50\n" >/etc/sysctl.d/99-aos.conf
+    sysctl --system >/dev/null
+  else
+    log "Swap already present"
+  fi
 fi
 
-# Install essential packages (including UFW)
-echo "Installing essential packages..."
-apt install -y curl wget git unzip htop fail2ban logrotate cron ufw bc \
-    software-properties-common apt-transport-https ca-certificates \
-    gnupg lsb-release
-echo "SUCCESS: Essential packages installed"
-
-# Phase 2: Security Configuration
-echo ""
-echo "Phase 2: Security Configuration"
-echo "-------------------------------"
-
-# Configure UFW Firewall
-echo "Configuring UFW firewall..."
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
-echo "SUCCESS: UFW firewall configured and enabled"
-
-# Configure Fail2Ban using repo files
-echo "Configuring Fail2Ban..."
-systemctl enable fail2ban
-systemctl start fail2ban
-
-# Use configuration files from this repo
-cp "$SCRIPT_DIR/jail.local" /etc/fail2ban/jail.local
-cp "$SCRIPT_DIR/caddy-auth.conf" /etc/fail2ban/filter.d/caddy-auth.conf
-systemctl restart fail2ban
-echo "SUCCESS: Fail2Ban configured with custom rules"
-
-# Phase 3: Web Server Installation
-echo ""
-echo "Phase 3: Web Server Installation"
-echo "--------------------------------"
-
-# Install Caddy
-echo "Installing Caddy web server..."
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-apt update
-apt install caddy -y
-systemctl enable caddy
-systemctl start caddy
-echo "SUCCESS: Caddy installed and started"
-
-# Install PHP 8.2 and required modules
-echo "Installing PHP 8.2 and modules..."
-apt install -y php8.2-fpm php8.2-cli php8.2-curl php8.2-gd php8.2-mbstring \
-    php8.2-xml php8.2-zip php8.2-intl php8.2-bcmath php8.2-yaml \
-    php8.2-opcache php8.2-readline
-
-# Configure PHP for better performance and security
-echo "Optimizing PHP configuration..."
-PHP_INI="/etc/php/8.2/fpm/php.ini"
-sed -i 's/upload_max_filesize = 2M/upload_max_filesize = 5M/' "$PHP_INI"
-sed -i 's/post_max_size = 8M/post_max_size = 6M/' "$PHP_INI"
-sed -i 's/memory_limit = 128M/memory_limit = 192M/' "$PHP_INI"  # Instead of 256M
-sed -i 's/max_execution_time = 30/max_execution_time = 300/' "$PHP_INI"
-sed -i 's/max_input_vars = 1000/max_input_vars = 3000/' "$PHP_INI"
-sed -i 's/;opcache.enable=1/opcache.enable=1/' "$PHP_INI"
-sed -i 's/;opcache.memory_consumption=128/opcache.memory_consumption=128/' "$PHP_INI"
-
-systemctl enable php8.2-fpm
-systemctl restart php8.2-fpm
-echo "SUCCESS: PHP 8.2 installed and optimized"
-
-# Phase 4: Static Site Generator
-echo ""
-echo "Phase 4: Static Site Generator"
-echo "------------------------------"
-
-# Install Hugo
-echo "Installing Hugo (latest extended version)..."
-HUGO_VERSION=$(curl -s https://api.github.com/repos/gohugoio/hugo/releases/latest | grep "tag_name" | cut -d '"' -f 4 | sed 's/v//')
-echo "Installing Hugo version: $HUGO_VERSION"
-wget -O /tmp/hugo.deb "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
-dpkg -i /tmp/hugo.deb
-rm /tmp/hugo.deb
-echo "SUCCESS: Hugo $HUGO_VERSION installed"
-
-# Phase 5: CMS and Directory Structure
-echo ""
-echo "Phase 5: CMS and Directory Structure"
-echo "------------------------------------"
-
-# Create directory structure
-echo "Creating directory structure..."
-mkdir -p /var/www /var/backups/sites /var/backups/server /var/log/forms
-echo "SUCCESS: Directory structure created"
-
-# Download and setup Grav CMS (core version, no admin) for default site
-echo "Installing Grav CMS core for default site..."
-cd /tmp
-wget https://getgrav.org/download/core/grav/latest -O grav-core.zip
-unzip grav-core.zip
-mv grav /var/www/cms
-rm grav-core.zip
-chown -R www-data:www-data /var/www/cms
-chmod -R 755 /var/www/cms
-
-# Phase 6: Form Handler and Management Scripts
-echo ""
-echo "Phase 6: Form Handler and Management Scripts"
-echo "--------------------------------------------"
-
-# Install form handler from repo
-echo "Installing form handler..."
-cp "$SCRIPT_DIR/form-handler.php" /var/www/form-handler.php
-chmod 644 /var/www/form-handler.php
-echo "SUCCESS: Form handler installed"
-
-# Install management scripts from repo
-echo "Installing management scripts..."
-cp "$SCRIPT_DIR/create-site.sh" /root/
-cp "$SCRIPT_DIR/backup-sites.sh" /root/
-cp "$SCRIPT_DIR/server-monitor.sh" /root/
-cp "$SCRIPT_DIR/server-update.sh" /root/
-cp "$SCRIPT_DIR/form-secrets.template" /root/.form-secrets
-
-chmod +x /root/*.sh
-chmod 600 /root/.form-secrets
-echo "SUCCESS: Management scripts installed"
-
-# Install Caddy configuration from repo
-echo "Installing Caddy configuration..."
-cp "$SCRIPT_DIR/caddyfile.template" /etc/caddy/Caddyfile
-
-# Update email in Caddyfile (prompt user)
-echo ""
-read -p "Enter your email for SSL certificates (e.g., admin@yourdomain.com): " USER_EMAIL
-if [ -n "$USER_EMAIL" ]; then
-    sed -i "s/admin@yourdomain.com/$USER_EMAIL/" /etc/caddy/Caddyfile
-    echo "SUCCESS: SSL email set to: $USER_EMAIL"
+if [[ "$ENABLE_UFW" == "yes" ]]; then
+  log "Configuring UFW"
+  ufw --force reset
+  ufw default deny incoming
+  ufw default allow outgoing
+  ufw allow "$SSH_PORT"/tcp
+  ufw allow 80/tcp
+  ufw allow 443/tcp
+  ufw --force enable
 fi
 
-# Test and reload Caddy
-if caddy validate --config /etc/caddy/Caddyfile; then
-    systemctl reload caddy
-    echo "SUCCESS: Caddy configuration loaded successfully"
-else
-    echo "ERROR: Caddy configuration error - check manually"
+log "Hardening SSH"
+SSHD=/etc/ssh/sshd_config
+sed -i 's/^[# ]*PasswordAuthentication .*/PasswordAuthentication no/' "$SSHD"
+sed -i 's/^[# ]*PermitRootLogin .*/PermitRootLogin prohibit-password/' "$SSHD"
+if ! file_has_line "$SSHD" "ClientAliveInterval 300"; then
+  printf "\nClientAliveInterval 300\nClientAliveCountMax 2\n" >> "$SSHD"
 fi
+systemctl reload ssh || true
 
-# Phase 7: Automation and Monitoring
-echo ""
-echo "Phase 7: Automation and Monitoring"
-echo "----------------------------------"
+log "Configuring Fail2ban"
+ensure_dir /etc/fail2ban/jail.d 755
+if [[ -f "$AOS_REPO_DIR/jail.local" ]]; then
+  install -m 0644 "$AOS_REPO_DIR/jail.local" /etc/fail2ban/jail.d/aos.local
+fi
+# Correct location for the Caddy auth filter
+if [[ -f "$AOS_REPO_DIR/caddy-auth.conf" ]]; then
+  install -m 0644 "$AOS_REPO_DIR/caddy-auth.conf" /etc/fail2ban/filter.d/caddy-auth.conf
+fi
+systemctl enable --now fail2ban
 
-# Set up log rotation
-echo "Configuring log rotation..."
-cp "$SCRIPT_DIR/logrotate-caddy-sites" /etc/logrotate.d/caddy-sites
-echo "SUCCESS: Log rotation configured"
-
-# Set up cron jobs
-echo "Installing automated tasks..."
-(crontab -l 2>/dev/null; echo "0 2 * * * /root/backup-sites.sh >/dev/null 2>&1") | crontab -
-(crontab -l 2>/dev/null; echo "*/15 * * * * /root/server-monitor.sh >/dev/null 2>&1") | crontab -
-(crontab -l 2>/dev/null; echo "0 4 * * 0 /root/server-update.sh >/dev/null 2>&1") | crontab -
-echo "SUCCESS: Automated tasks scheduled"
-
-# Set up bash aliases
-echo "Installing command aliases..."
-cat >> /root/.bashrc << 'EOF'
-
-# Alpha Omega Strategies Server Management
-alias create-site='/root/create-site.sh'
-alias backup-sites='/root/backup-sites.sh'
-alias update-server='/root/update-server.sh'
-alias monitor-server='tail -f /var/log/server-monitor.log'
-alias check-sites='ls -la /var/www/'
-alias caddy-reload='caddy reload --config /etc/caddy/Caddyfile'
-alias caddy-logs='journalctl -u caddy -f'
+log "Enable unattended-upgrades"
+dpkg-reconfigure --priority=low unattended-upgrades || true
+cat >/etc/apt/apt.conf.d/51aos-unattended.conf <<'EOF'
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:30";
 EOF
-echo "SUCCESS: Command aliases installed"
 
-# Phase 8: Final Configuration
-echo ""
-echo "Phase 8: Final Configuration"
-echo "----------------------------"
+# Caddy installation from vendor repo
+if ! command -v caddy >/dev/null 2>&1; then
+  log "Installing Caddy"
+  apt-get install -y debian-keyring debian-archive-keyring
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+  apt-get update -y
+  apt-get install -y caddy
+else
+  log "Caddy already installed"
+fi
 
-# Set final permissions
-echo "Setting final permissions..."
-chown -R www-data:www-data /var/www
-chmod -R 755 /var/www
-chmod 644 /var/www/form-handler.php
-echo "SUCCESS: Permissions set correctly"
+# Ensure Caddy log dir exists for access/error logs
+install -d -o caddy -g caddy -m 755 /var/log/caddy
 
-# Final status check
-echo ""
-echo "Verifying installation..."
-CADDY_STATUS=$(systemctl is-active caddy)
-PHP_STATUS=$(systemctl is-active php8.2-fpm)
-FAIL2BAN_STATUS=$(systemctl is-active fail2ban)
+log "Tune PHP-FPM for 4GB VPS"
+PHP_INI=/etc/php/8.2/fpm/php.ini
+POOL_CONF=/etc/php/8.2/fpm/pool.d/www.conf
+sed -i 's/^;*opcache.enable=.*/opcache.enable=1/' "$PHP_INI"
+sed -i 's/^;*opcache.memory_consumption=.*/opcache.memory_consumption=128/' "$PHP_INI"
+sed -i 's/^;*opcache.max_accelerated_files=.*/opcache.max_accelerated_files=10000/' "$PHP_INI"
+sed -i 's/^;*cgi.fix_pathinfo=.*/cgi.fix_pathinfo=0/' "$PHP_INI"
+sed -i 's/^pm = .*/pm = dynamic/' "$POOL_CONF"
+sed -i 's/^pm.max_children = .*/pm.max_children = 12/' "$POOL_CONF"
+sed -i 's/^pm.start_servers = .*/pm.start_servers = 3/' "$POOL_CONF"
+sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 2/' "$POOL_CONF"
+sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 6/' "$POOL_CONF"
+systemctl enable --now php8.2-fpm
 
-echo "STATUS: Caddy: $CADDY_STATUS"
-echo "STATUS: PHP-FPM: $PHP_STATUS"
-echo "STATUS: Fail2Ban: $FAIL2BAN_STATUS"
+log "Create standard directories"
+ensure_dir "$SITES_DIR" 755
+ensure_dir "$BACKUP_DIR" 750
+ensure_dir "$FORM_LOG_DIR" 750
+chown -R "$WWW_USER:$WWW_GROUP" "$SITES_DIR"
+chown -R root:root "$BACKUP_DIR" "$FORM_LOG_DIR"
 
-# Server cleanup
-apt autoremove -y && apt autoclean
+log "Deploy Caddyfile template if present"
+if [[ -f "$AOS_REPO_DIR/caddyfile.template" ]]; then
+  install -m 0644 "$AOS_REPO_DIR/caddyfile.template" /etc/caddy/Caddyfile
+  if caddy validate --config /etc/caddy/Caddyfile; then
+    systemctl enable --now caddy
+    systemctl reload caddy || true
+  else
+    log "WARNING: Caddyfile validation failed"
+  fi
+fi
 
-# Get server IP for final instructions
-SERVER_IP=$(curl -s http://ipv4.icanhazip.com/ || echo "YOUR-SERVER-IP")
+log "Install form handler and secrets template if present"
+[[ -f "$AOS_REPO_DIR/form-handler.php" ]] && install -m 0644 "$AOS_REPO_DIR/form-handler.php" "$SITES_DIR"/form-handler.php && chown "$WWW_USER:$WWW_GROUP" "$SITES_DIR"/form-handler.php
+[[ -f "$AOS_REPO_DIR/form-secrets.template" ]] && install -m 0640 "$AOS_REPO_DIR/form-secrets.template" /etc/aos-form-secrets && chgrp "$WWW_GROUP" /etc/aos-form-secrets || true
 
-echo ""
-echo "========================================="
-echo "========================================="
-echo "SERVER SETUP COMPLETED SUCCESSFULLY!"
-echo "========================================="
-echo ""
-echo "SERVICES INSTALLED:"
-echo "   - Caddy web server with auto-SSL"
-echo "   - PHP 8.2 FPM optimized for performance"
-echo "   - Hugo static site generator"
-echo "   - Grav CMS (core + essential plugins)"
-echo "   - Universal form handler with Postmark/B2 integration"
-echo "   - Automated backups, monitoring, and updates"
-echo "   - Security hardening (UFW + Fail2Ban)"
-echo ""
-echo "AVAILABLE COMMANDS:"
-echo "   - create-site domain.com [grav|hugo]"
-echo "   - backup-sites"
-echo "   - update-server"  
-echo "   - monitor-server"
-echo "   - check-sites"
-echo ""
-echo "ACCESS YOUR SERVER:"
-echo "   - Default Grav CMS: http://$SERVER_IP"
-echo "   - Form handler: http://$SERVER_IP/form-handler.php"
-echo "   - Server health: http://$SERVER_IP/health"
-echo ""
-echo "NEXT STEPS:"
-echo "   1. Configure API credentials: nano /root/.form-secrets"
-echo "   2. Create your first site: create-site yourdomain.com grav"
-echo "   3. Point DNS to: $SERVER_IP"
-echo "   4. SSL certificates will generate automatically"
-echo ""
-echo "FILE LOCATIONS:"
-echo "   - Sites: /var/www/"
-echo "   - Scripts: /root/my-scripts/"
-echo "   - Logs: /var/log/"
-echo "   - Backups: /var/backups/sites/"
-echo ""
-echo "MANAGEMENT:"
-echo "   - Edit sites via WinSCP at /var/www/sitename/user/pages/"
-echo "   - Form submissions logged to /var/log/forms/"
-echo "   - Daily backups at 2 AM (14-day retention)"
-echo "   - Server monitoring every 15 minutes"
-echo ""
-echo "========================================="
-echo "Alpha Omega Strategies server is ready!"
-echo "========================================"
+if [[ -f "$AOS_REPO_DIR/logrotate-caddy-sites" ]]; then
+  log "Install logrotate for Caddy"
+  install -m 0644 "$AOS_REPO_DIR/logrotate-caddy-sites" /etc/logrotate.d/caddy-sites
+fi
+
+log "Symlink management scripts into PATH"
+install -d -m 755 "$SCRIPT_BIN_DIR"
+ln -sf "$AOS_REPO_DIR/create-site.sh"    "$SCRIPT_BIN_DIR/create-site"
+ln -sf "$AOS_REPO_DIR/backup-sites.sh"   "$SCRIPT_BIN_DIR/backup-sites"
+ln -sf "$AOS_REPO_DIR/server-update.sh"  "$SCRIPT_BIN_DIR/server-update"
+ln -sf "$AOS_REPO_DIR/server-monitor.sh" "$SCRIPT_BIN_DIR/server-monitor"
+
+log "Create systemd timers"
+cat >/etc/systemd/system/aos-backup.service <<EOF
+[Unit]
+Description=AOS site backups
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_BIN_DIR/backup-sites
+EOF
+
+cat >/etc/systemd/system/aos-backup.timer <<'EOF'
+[Unit]
+Description=Run AOS site backups daily at 02:00
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+cat >/etc/systemd/system/aos-update.service <<EOF
+[Unit]
+Description=AOS weekly server update
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_BIN_DIR/server-update
+EOF
+
+cat >/etc/systemd/system/aos-update.timer <<'EOF'
+[Unit]
+Description=Run AOS server updates weekly Sun 04:00
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+cat >/etc/systemd/system/aos-monitor.service <<EOF
+[Unit]
+Description=AOS server monitor
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_BIN_DIR/server-monitor
+EOF
+
+cat >/etc/systemd/system/aos-monitor.timer <<'EOF'
+[Unit]
+Description=Run AOS monitor every 15 minutes
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now aos-backup.timer aos-update.timer aos-monitor.timer
+
+log "Apply safe sysctl hardening"
+cat >/etc/sysctl.d/60-aos-hardening.conf <<'EOF'
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ip4.conf.all.send_redirects = 0
+net.ip4.conf.default.send_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+EOF
+sysctl --system >/dev/null
+
+log "Verifying services"
+systemctl is-active --quiet caddy && log "Caddy active"
+systemctl is-active --quiet php8.2-fpm && log "PHP-FPM active"
+systemctl is-enabled --quiet aos-backup.timer && log "Backup timer enabled"
+systemctl is-enabled --quiet aos-update.timer && log "Update timer enabled"
+systemctl is-enabled --quiet aos-monitor.timer && log "Monitor timer enabled"
+
+echo "Setup complete."
+echo "Sites: $SITES_DIR"
+echo "Backups: $BACKUP_DIR"
+echo "Form logs: $FORM_LOG_DIR"
+echo "Scripts in PATH: create-site, backup-sites, server-update, server-monitor"
