@@ -1,19 +1,42 @@
+# Fail2ban local jails for Alpha Omega Strategies
+# Installed to /etc/fail2ban/jail.d/aos.local by server-setup.sh
+
 [DEFAULT]
-bantime = 3600
-findtime = 600
+# Add your trusted IPs or office ranges here if you want to bypass bans
+ignoreip = 127.0.0.1/8 ::1
+bantime  = 1h
+findtime = 10m
 maxretry = 5
-backend = systemd
+backend  = systemd
+usedns   = warn
+banaction = ufw
 
+# SSH protection
 [sshd]
-enabled = true
-port = ssh
-logpath = %(sshd_log)s
-backend = %(sshd_backend)s
+enabled  = true
+port     = ssh
+backend  = systemd
+# Debian defaults pick up sshd via journal; no logpath needed when backend=systemd
+maxretry = 6
+findtime = 10m
+bantime  = 2h
 
+# Caddy auth probing (401/403 brute attempts, JSON access logs)
+# Requires filter: /etc/fail2ban/filter.d/caddy-auth.conf
 [caddy-auth]
-enabled = true
-port = http,https
-filter = caddy-auth
-logpath = /var/log/caddy/access.log
-maxretry = 3
-bantime = 1800
+enabled  = true
+filter   = caddy-auth
+logpath  = /var/log/caddy/*.log
+maxretry = 6
+findtime = 10m
+bantime  = 2h
+action   = ufw
+
+# Recidive: escalate longer bans for repeat offenders across all jails
+[recidive]
+enabled  = true
+logpath  = /var/log/fail2ban.log
+findtime = 1d
+bantime  = 1w
+maxretry = 5
+action   = ufw
