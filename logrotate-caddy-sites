@@ -1,39 +1,18 @@
-# Log rotation for Caddy and form handler logs
-# Place in /etc/logrotate.d/caddy-sites
+# Caddy manages rotation of the active *.log files (see Caddyfile "log { roll_* }").
+# This logrotate policy ONLY compresses and ages out Caddy's already-rotated files.
+# Do NOT include /var/log/caddy/*.log here or you will fight Caddy's rotation.
 
-/var/log/caddy/*.log {
-    daily
+# Compress and prune Caddy-rotated logs, regardless of suffix scheme.
+# Caddy typically names rotated files with a timestamp, e.g. site-YYYYMMDD-HHMMSS.log
+/var/log/caddy/*.log-* /var/log/caddy/*.log.* {
     missingok
-    rotate 14
-    compress
-    delaycompress
     notifempty
-    create 0644 caddy caddy
+    daily
+    compress              # default gzip
+    delaycompress         # compress on the next run to avoid racing any late writers
+    maxage 90             # hard limit: delete anything older than 90 days
+    su caddy caddy        # operate as the caddy user/group
+    nocreate              # never create new files (Caddy creates the actives)
     sharedscripts
-    postrotate
-        systemctl reload caddy > /dev/null 2>&1 || true
-    endscript
-}
-
-# Form handler logs - keep for 5 years (1826 days) per company retention policy
-/var/log/forms/*/*.log {
-    daily
-    missingok
-    rotate 1826
-    compress
-    delaycompress
-    notifempty
-    create 0644 www-data www-data
-    # No service restart needed for form logs
-}
-
-# Server monitoring logs
-/var/log/server-monitor.log {
-    weekly
-    missingok
-    rotate 52
-    compress
-    delaycompress
-    notifempty
-    create 0644 root root
+    # No postrotate needed; we aren't touching the active files.
 }
