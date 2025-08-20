@@ -1,325 +1,252 @@
 #!/bin/bash
+# Create a new site (Grav or Hugo) on Debian 12 with Caddy + PHP-FPM
+# Usage: create-site domain.com [grav|hugo]
+# Example: create-site example.org grav
+#
+# Behavior:
+# - Grav installs per-site under /var/www/<domain>
+# - Hugo uses /var/www/<domain>/site (sources) and /var/www/<domain>/public (webroot)
+# - Appends a site block to /etc/caddy/Caddyfile and reloads Caddy
+# - Writes JSON access logs to /var/log/caddy/<domain>.log for Fail2ban
+#
+# Requirements:
+# - Run as root
+# - Caddy and PHP-FPM installed (server-setup.sh handles this)
+# - Repo cloned to /opt/server-scripts
 
-# Create new site (Grav or Hugo) for Alpha Omega Strategies
-# Usage: create-site.sh domain.com [grav|hugo]
-# Example: create-site.sh mysite.com grav
+set -euo pipefail
+trap 'echo "ERROR: create-site failed at line $LINENO" >&2' ERR
 
-set -e
+# ---- Config -------------------------------------------------------------------
+SITES_DIR="/var/www"
+CADDYFILE="/etc/caddy/Caddyfile"
+PHP_SOCK="/run/php/php8.2-fpm.sock"
+LOG_DIR="/var/log/caddy"
+WWW_USER="www-data"
+WWW_GROUP="www-data"
 
-if [ $# -lt 1 ]; then
-    echo "Usage: $0 domain.com [grav|hugo]"
-    echo "Example: $0 mysite.com grav"
-    echo ""
-    echo "Available types:"
-    echo "  grav  - Grav CMS with Hadron theme (no admin panel)"
-    echo "  hugo  - Hugo static site with Clarity theme"
-    exit 1
-fi
+# Hugo on-demand install config
+INSTALL_HUGO_ON_DEMAND="yes"
+# Set a pinned version for reproducibility. Use "latest" to fetch latest at runtime.
+HUGO_VERSION="${HUGO_VERSION:-0.126.1}"   # change as desired
+ARCH="$(dpkg --print-architecture)"       # usually amd64 on Linode
 
-DOMAIN=$1
-TYPE=${2:-grav}
-SITENAME=$(echo $DOMAIN | sed 's/\..*//')
-SITEDIR="/var/www/$SITENAME"
-
-# Validate inputs
-if [ -d "$SITEDIR" ]; then
-    echo "Error: Site directory $SITEDIR already exists"
-    echo "Remove it first or choose a different domain name"
-    exit 1
-fi
-
-if [[ ! "$TYPE" =~ ^(grav|hugo)$ ]]; then
-    echo "Error: Unknown site type '$TYPE'. Use 'grav' or 'hugo'"
-    exit 1
-fi
-
-# Cleanup function for failed installations
-cleanup_failed_site() {
-    echo "Cleaning up failed installation..."
-    
-    # Remove site directory if it exists
-    if [ -d "$SITEDIR" ]; then
-        rm -rf "$SITEDIR"
-        echo "Removed site directory: $SITEDIR"
-    fi
-    
-    # Remove Caddy configuration block if it was added
-    if grep -q "# $DOMAIN" /etc/caddy/Caddyfile 2>/dev/null; then
-        echo "Removing Caddy configuration..."
-        head -n -$(($(grep -n "# $DOMAIN" /etc/caddy/Caddyfile | tail -1 | cut -d: -f1) - 1)) /etc/caddy/Caddyfile > /tmp/caddyfile.tmp
-        mv /tmp/caddyfile.tmp /etc/caddy/Caddyfile
-    fi
-    
-    # Clean up temporary files
-    cd /tmp
-    rm -f grav-core.zip
-    rm -rf grav
-    
-    echo "Cleanup completed"
-    exit 1
+# ---- Helpers ------------------------------------------------------------------
+usage() {
+  echo "Usage: $0 domain.com [grav|hugo]"
+  echo "Example: $0 example.org grav"
+  echo ""
+  echo "Types:"
+  echo "  grav  Grav CMS (no admin plugin by default)"
+  echo "  hugo  Hugo static site (build on server; optional on-demand Hugo install)"
+  exit 1
 }
 
-# Set trap to run cleanup on script failure
-trap cleanup_failed_site ERR
+require_root() {
+  if [[ $EUID -ne 0 ]]; then
+    echo "Please run as root." >&2
+    exit 1
+  fi
+}
 
-echo "Creating $TYPE site for $DOMAIN..."
+valid_domain() {
+  local d="$1"
+  [[ "$d" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]]
+}
+
+ensure_dir() { install -d -m "$2" "$1"; }
+append_if_missing() { local f="$1" s="$2"; grep -Fqs "$s" "$f" || printf "%s\n" "$s" >> "$f"; }
+
+install_hugo() {
+  if command -v hugo >/dev/null 2>&1; then
+    echo "Hugo already installed."
+    return 0
+  fi
+
+  [[ "$INSTALL_HUGO_ON_DEMAND" == "yes" ]] || { echo "Hugo not installed and on-demand install disabled."; return 1; }
+
+  local ver="$HUGO_VERSION"
+  if [[ "$ver" == "latest" ]]; then
+    # Fetch latest tag name from GitHub API
+    ver="$(curl -fsSL https://api.github.com/repos/gohugoio/hugo/releases/latest | awk -F'"' '/tag_name/ {print $4}' | sed 's/^v//')"
+    [[ -n "$ver" ]] || { echo "Failed to get latest Hugo version."; return 1; }
+  fi
+
+  echo "Installing Hugo Extended v${ver}..."
+  local pkg="/tmp/hugo_extended_${ver}_linux-${ARCH}.deb"
+  local url="https://github.com/gohugoio/hugo/releases/download/v${ver}/hugo_extended_${ver}_linux-${ARCH}.deb"
+
+  curl -fsSL -o "$pkg" "$url"
+  apt-get install -y "$pkg"
+  rm -f "$pkg"
+  echo "Hugo v${ver} installed."
+}
+
+reload_caddy() {
+  if caddy validate --config "$CADDYFILE"; then
+    systemctl reload caddy
+    echo "Caddy reloaded."
+  else
+    echo "ERROR: Caddyfile validation failed. Check $CADDYFILE" >&2
+    exit 1
+  fi
+}
+
+harden_permissions() {
+  local dir="$1"
+  chown -R "$WWW_USER:$WWW_GROUP" "$dir"
+  find "$dir" -type d -print0 | xargs -0 chmod 755
+  find "$dir" -type f -print0 | xargs -0 chmod 644
+}
+
+# ---- Args ---------------------------------------------------------------------
+require_root
+DOMAIN="${1:-}"
+TYPE="${2:-grav}"
+
+[[ -n "$DOMAIN" ]] || usage
+valid_domain "$DOMAIN" || { echo "Invalid domain: $DOMAIN" >&2; exit 1; }
+[[ "$TYPE" == "grav" || "$TYPE" == "hugo" ]] || usage
+
+SITEDIR="$SITES_DIR/$DOMAIN"
+echo "Creating $TYPE site for $DOMAIN"
 echo "Site directory: $SITEDIR"
 
-if [ "$TYPE" = "grav" ]; then
-    echo "Installing fresh Grav CMS..."
-    
-    # Download and install Grav directly
-    cd /tmp
-    if ! wget https://getgrav.org/download/core/grav/latest -O grav-core.zip; then
-        echo "ERROR: Failed to download Grav"
-        exit 1
-    fi
-    
-    if ! unzip -q grav-core.zip; then
-        echo "ERROR: Failed to extract Grav archive"
-        rm -f grav-core.zip
-        exit 1
-    fi
-    
-    if ! mv grav "$SITEDIR"; then
-        echo "ERROR: Failed to move Grav to site directory"
-        rm -rf grav grav-core.zip
-        exit 1
-    fi
-    
-    rm grav-core.zip
-    echo "SUCCESS: Grav core installed"
-    
-    # Set proper permissions 
-    chown -R www-data:www-data "$SITEDIR"
-    chmod -R 755 "$SITEDIR"
-    chmod -R 775 "$SITEDIR"/{cache,logs,tmp,backup,user}
-    echo "SUCCESS: Permissions set"
-    
-    # Install Hadron theme
-    echo "Installing Hadron theme..."
-    cd "$SITEDIR"
-    if ! sudo -u www-data php bin/gpm install hadron -y; then
-        echo "ERROR: Failed to install Hadron theme"
-        exit 1
-    fi
-    
-    # Set Hadron as the default theme
-    if ! sudo -u www-data sed -i "s/theme: .*/theme: hadron/" user/config/system.yaml; then
-        echo "ERROR: Failed to set Hadron as default theme"
-        exit 1
-    fi
-    echo "SUCCESS: Hadron theme installed and activated"
-    
-    # Create site configuration
-    echo "Creating site configuration..."
-    cat > "$SITEDIR/user/config/site.yaml" << EOL
-title: '$DOMAIN'
-author:
-  name: 'Alpha Omega Strategies'
-  email: 'admin@$DOMAIN'
-metadata:
-  description: 'Professional consulting services'
-  keywords: 'consulting, rural development, grants, strategic planning'
-taxonomies: [category,tag]
-summary:
-  enabled: true
-  format: short
-  size: 300
-blog:
-  route: '/blog'
-accessibility:
-  enabled: true
-  skip_links: true
-  high_contrast: false
-cache:
-  enabled: true
-  check:
-    method: file
-twig:
-  cache: true
-  debug: false
-  auto_reload: false
-debugger:
-  enabled: false
-  shutdown:
-    close_connection: true
-EOL
-    echo "SUCCESS: Site configuration created"
+if [[ -e "$SITEDIR" ]]; then
+  echo "ERROR: $SITEDIR already exists. Aborting." >&2
+  exit 1
+fi
 
-    # Add site configuration to Caddyfile
-    echo "Adding Caddy configuration..."
-    cat >> /etc/caddy/Caddyfile << EOL
+# ---- Prep ---------------------------------------------------------------------
+ensure_dir "$LOG_DIR" 755
+chown caddy:caddy "$LOG_DIR" || true
+ensure_dir "$SITEDIR" 755
 
-# $DOMAIN - Grav CMS Site with Hadron Theme
+# ---- Install per type ---------------------------------------------------------
+if [[ "$TYPE" == "grav" ]]; then
+  # Install Grav (core, no admin plugin) into site root
+  echo "Installing Grav..."
+  pushd /tmp >/dev/null
+  # URL alias 'latest' is maintained by Grav project
+  curl -fsSL -o grav-core.zip https://getgrav.org/download/core/grav/latest
+  unzip -q grav-core.zip
+  # The zip typically extracts into a folder named 'grav'
+  shopt -s dotglob
+  mv grav/* "$SITEDIR"/
+  shopt -u dotglob
+  popd >/dev/null
+  rm -f /tmp/grav-core.zip
+  # Recommended writable dirs for Grav
+  find "$SITEDIR"/{cache,images,assets,logs,backup} -type d 2>/dev/null | xargs -r chmod 775 || true
+  harden_permissions "$SITEDIR"
+
+  # Caddy block for Grav
+  cat >>"$CADDYFILE" <<EOF
+
 $DOMAIN {
     root * $SITEDIR
-    php_fastcgi unix//run/php/php8.2-fpm.sock
+    encode gzip zstd
+    try_files {path} {path}/ /index.php?{query}
+    php_fastcgi unix//$PHP_SOCK
     file_server
-    
-    # Security headers
     header {
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        X-XSS-Protection "1; mode=block"
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer-when-downgrade"
+        X-Frame-Options "SAMEORIGIN"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
     }
-    
-    # Grav-specific security rules
-    @forbidden {
-        path /*.md /*.txt /*.yaml /*.yml /*.php~ /*.orig /*.bak
-        path /cache/* /logs/* /tmp/* /backup/* /system/* /vendor/*
-        path /.git/* /.gitignore /.htaccess
+    log {
+        output file $LOG_DIR/$DOMAIN.log {
+            roll_size 25MiB
+            roll_keep 14
+            roll_keep_for 336h
+        }
+        format json
     }
-    respond @forbidden 403
-    
-    # Enable compression
-    encode gzip
-    
-    # Cache static assets
-    @static {
-        path *.css *.js *.png *.jpg *.jpeg *.gif *.svg *.woff *.woff2 *.ico
-    }
-    header @static Cache-Control "public, max-age=31536000"    
 }
-EOL
+EOF
 
-    echo "Grav site with Hadron theme created successfully!"
-    echo "Edit content in: $SITEDIR/user/pages/"
-    echo "Form handler available at: https://$DOMAIN/form-handler.php"
+elif [[ "$TYPE" == "hugo" ]]; then
+  # Hugo site: sources in site/, published HTML in public/
+  echo "Preparing Hugo site layout..."
+  SRC="$SITEDIR/site"
+  PUB="$SITEDIR/public"
+  ensure_dir "$SRC" 755
+  ensure_dir "$PUB" 755
 
-elif [ "$TYPE" = "hugo" ]; then
-    echo "Creating fresh Hugo site..."
-    
-    # Create new Hugo site
-    if ! hugo new site "$SITEDIR"; then
-        echo "ERROR: Failed to create Hugo site"
-        exit 1
-    fi
-    
-    cd "$SITEDIR"
-    echo "SUCCESS: Hugo site structure created"
-    
-    # Install Clarity theme
-    echo "Installing Clarity theme..."
-    if ! git init; then
-        echo "ERROR: Failed to initialize git repository"
-        exit 1
-    fi
-    
-    if ! git submodule add https://github.com/chipzoller/hugo-clarity themes/clarity; then
-        echo "ERROR: Failed to install Clarity theme"
-        exit 1
-    fi
-    
-    # Copy example config if it exists
-    if [ -d "themes/clarity/exampleSite/config" ]; then
-        cp -r themes/clarity/exampleSite/config/* config/ 2>/dev/null || true
-        echo "SUCCESS: Copied example configuration"
-    fi
-    
-    # Set proper permissions
-    chown -R www-data:www-data "$SITEDIR"
-    chmod -R 755 "$SITEDIR"
-    echo "SUCCESS: Permissions set"
-    
-    # Update config for this domain
-    echo "Configuring site for $DOMAIN..."
-    sed -i "s|baseURL = .*|baseURL = 'https://$DOMAIN'|" config/_default/config.yaml 2>/dev/null || true
-    sed -i "s|title = .*|title = '$DOMAIN'|" config/_default/config.yaml 2>/dev/null || true
-    
-    # Build the site
-    echo "Building Hugo site..."
-    if ! hugo --minify; then
-        echo "ERROR: Failed to build Hugo site"
-        exit 1
-    fi
-    echo "SUCCESS: Hugo site built"
-    
-    # Add site configuration to Caddyfile
-    echo "Adding Caddy configuration..."
-    cat >> /etc/caddy/Caddyfile << EOL
+  if ! command -v hugo >/dev/null 2>&1; then
+    echo "Hugo not found."
+    install_hugo
+  fi
 
-# $DOMAIN - Hugo Static Site with Clarity Theme
+  echo "Bootstrapping Hugo project..."
+  hugo new site "$SRC" --force >/dev/null
+
+  # Minimal, accessible config. User can replace later.
+  cat > "$SRC/hugo.toml" <<'EOH'
+baseURL = "/"
+languageCode = "en-us"
+title = "New Hugo Site"
+enableRobotsTXT = true
+
+[outputs]
+home = ["HTML", "RSS"]
+
+[markup.goldmark.renderer]
+unsafe = false
+EOH
+
+  # Starter content
+  hugo new --source "$SRC" posts/welcome.md >/dev/null || true
+  sed -i 's/draft: true/draft: false/' "$SRC/content/posts/welcome.md" || true
+
+  echo "Building site..."
+  hugo --minify --source "$SRC" --destination "$PUB"
+
+  harden_permissions "$SITEDIR"
+
+  # Caddy block for Hugo
+  cat >>"$CADDYFILE" <<EOF
+
 $DOMAIN {
-    root * $SITEDIR/public
+    root * $PUB
+    encode gzip zstd
     file_server
-    
-    # Security headers
     header {
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        X-XSS-Protection "1; mode=block"
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer-when-downgrade"
+        X-Frame-Options "SAMEORIGIN"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
     }
-    
-    # Enable compression
-    encode gzip
-    
-    # Cache static assets aggressively
-    @static {
-        path *.css *.js *.png *.jpg *.jpeg *.gif *.svg *.woff *.woff2 *.ico *.pdf
+    log {
+        output file $LOG_DIR/$DOMAIN.log {
+            roll_size 25MiB
+            roll_keep 14
+            roll_keep_for 336h
+        }
+        format json
     }
-    header @static Cache-Control "public, max-age=31536000, immutable"
-    
-    # Cache HTML for shorter time
-    @html {
-        path *.html /
-    }
-    header @html Cache-Control "public, max-age=300"
-    
-    # Handle clean URLs (remove .html extension)
-    try_files {path} {path}.html {path}/ =404
 }
-EOL
-
-    echo "Hugo site with Clarity theme created successfully!"
-    echo "Edit content in: $SITEDIR/content/"
-    echo "Rebuild with: cd $SITEDIR && hugo --minify"
-    echo "Form handler available at: https://$DOMAIN/form-handler.php"
+EOF
 fi
 
-# Test Caddy configuration
-echo "Testing Caddy configuration..."
-if caddy validate --config /etc/caddy/Caddyfile; then
-    echo "Configuration valid. Reloading Caddy..."
-    caddy reload --config /etc/caddy/Caddyfile
-else
-    echo "ERROR: Caddy configuration is invalid!"
-    echo "Removing the added configuration..."
-    # Remove the last site block we just added
-    head -n -$(($(grep -n "# $DOMAIN" /etc/caddy/Caddyfile | tail -1 | cut -d: -f1) - 1)) /etc/caddy/Caddyfile > /tmp/caddyfile.tmp
-    mv /tmp/caddyfile.tmp /etc/caddy/Caddyfile
-    exit 1
-fi
-
-# Clear the trap since we succeeded
-trap - ERR
+# ---- Ownership, reload, next steps -------------------------------------------
+harden_permissions "$SITEDIR"
+reload_caddy
 
 echo ""
-echo "========================================="
-echo "Site created successfully!"
-echo "========================================="
+echo "Site created."
 echo "Domain: $DOMAIN"
 echo "Type: $TYPE"
-echo "Directory: $SITEDIR"
-if [ "$TYPE" = "grav" ]; then
-    echo "Theme: Hadron"
+if [[ "$TYPE" == "hugo" ]]; then
+  echo "Hugo sources: $SITEDIR/site"
+  echo "Web root:     $SITEDIR/public"
+  echo "Rebuild cmd:  hugo --minify --source $SITEDIR/site --destination $SITEDIR/public"
 else
-    echo "Theme: Clarity"
+  echo "Grav root:    $SITEDIR"
+  echo "Edit content: $SITEDIR/user/pages"
 fi
-echo ""
-echo "Next steps:"
-echo "1. Update DNS to point $DOMAIN to this server"
-echo "2. SSL certificate will be automatically generated by Caddy"
-if [ "$TYPE" = "grav" ]; then
-    echo "3. Edit content in $SITEDIR/user/pages/"
-    echo "4. Customize theme in $SITEDIR/user/config/"
-else
-    echo "3. Edit content in $SITEDIR/content/"
-    echo "4. Rebuild site with: cd $SITEDIR && hugo --minify"
-fi
-echo "5. Form handler available at: https://$DOMAIN/form-handler.php"
-echo "========================================="
+echo "Caddy logs:   $LOG_DIR/$DOMAIN.log (JSON)"
+echo "Remember DNS: point $DOMAIN to this server."
