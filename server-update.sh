@@ -1,52 +1,104 @@
 #!/bin/bash
+# Weekly OS and package maintenance for Debian 12
+# Safe for unattended use via systemd timer (runs Sun 04:00 from server-setup.sh)
+#
+# - Full upgrade with noninteractive apt
+# - Keeps existing config files by default
+# - Restarts key services (Caddy, PHP-FPM, Fail2ban) post-upgrade
+# - Detects when a reboot is required and schedules it (configurable)
+# - Writes a simple log and prevents overlapping runs
 
-echo "Updating server packages..."
-apt update && apt upgrade -y && apt autoremove -y && apt autoclean
+set -euo pipefail
+trap 'echo "ERROR: server-update failed at line $LINENO" >&2' ERR
 
-echo "Updating configuration files from GitHub..."
-cd /root/my-scripts
-git pull origin main
+# ---------- Config ----------
+LOG_FILE="/var/log/aos-update.log"
+ALLOW_REBOOT="${ALLOW_REBOOT:-yes}"    # set to "no" to never reboot automatically
+REBOOT_DELAY_MIN="${REBOOT_DELAY_MIN:-2}"  # minutes before reboot if needed
+APT_OPTS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+export DEBIAN_FRONTEND=noninteractive
+UMASK_VALUE="027"
 
-# Check if any config files were updated and apply them
-if [ -f "jail.local" ]; then
-    if ! cmp -s jail.local /etc/fail2ban/jail.local; then
-        echo "Updating Fail2Ban configuration..."
-        cp jail.local /etc/fail2ban/jail.local
-        systemctl restart fail2ban
-    fi
+# ---------- Helpers ----------
+log() { echo "$(date -Is) $*" | tee -a "$LOG_FILE" ; }
+ensure_dir() { install -d -m "$2" "$1"; }
+
+# Simple kernel-reboot detection:
+# If /boot has a newer kernel than the one running, we should reboot.
+kernel_reboot_required() {
+  local current latest
+  current="$(uname -r)"
+  latest="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sed 's#^/boot/vmlinuz-##' | sort -V | tail -n1 || true)"
+  [[ -n "$latest" && "$latest" != "$current" ]]
+}
+
+file_reboot_required() {
+  [[ -f /var/run/reboot-required ]] || [[ -f /run/reboot-required ]]
+}
+
+# ---------- Main ----------
+# Single-run lock
+exec 9>/var/lock/server-update.lock
+if ! flock -n 9; then
+  echo "$(date -Is) Another update run is in progress; exiting" | tee -a "$LOG_FILE"
+  exit 0
 fi
 
-if [ -f "caddy-auth.conf" ]; then
-    if ! cmp -s caddy-auth.conf /etc/fail2ban/filter.d/caddy-auth.conf; then
-        echo "Updating Fail2Ban Caddy filter..."
-        cp caddy-auth.conf /etc/fail2ban/filter.d/caddy-auth.conf
-        systemctl restart fail2ban
-    fi
-fi
+umask "$UMASK_VALUE"
+ensure_dir "$(dirname "$LOG_FILE")" 755
+: > "$LOG_FILE"
 
-if [ -f "logrotate-caddy-sites" ]; then
-    if ! cmp -s logrotate-caddy-sites /etc/logrotate.d/caddy-sites; then
-        echo "Updating log rotation configuration..."
-        cp logrotate-caddy-sites /etc/logrotate.d/caddy-sites
-    fi
-fi
+log "Starting weekly maintenance"
 
-echo "Updating Hugo..."
-HUGO_VERSION=$(curl -s https://api.github.com/repos/gohugoio/hugo/releases/latest | grep "tag_name" | cut -d '"' -f 4 | sed 's/v//')
-CURRENT_VERSION=$(hugo version 2>/dev/null | grep -o 'v[0-9.]*' | head -1 | sed 's/v//')
+# Refresh package lists
+log "apt-get update"
+apt-get update -y >>"$LOG_FILE" 2>&1
 
-if [ "$HUGO_VERSION" != "$CURRENT_VERSION" ]; then
-    echo "Updating Hugo from $CURRENT_VERSION to $HUGO_VERSION..."
-    wget -O /tmp/hugo.deb "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
-    dpkg -i /tmp/hugo.deb
-    rm /tmp/hugo.deb
-    echo "Hugo updated successfully"
+# Full upgrade, keep existing configs unless maintainer changes are safe
+log "apt-get full-upgrade"
+apt-get full-upgrade "${APT_OPTS[@]}" >>"$LOG_FILE" 2>&1
+
+# Clean up residuals and old caches
+log "apt-get autoremove --purge"
+apt-get autoremove --purge -y >>"$LOG_FILE" 2>&1 || true
+log "apt-get autoclean"
+apt-get autoclean -y >>"$LOG_FILE" 2>&1 || true
+
+# Reload systemd units in case packages added services
+systemctl daemon-reload || true
+
+# Restart key services to pick up new libraries
+# Do not hard-restart Caddy unless needed; a reload is usually enough.
+log "Refreshing services"
+systemctl try-restart php8.2-fpm.service || true
+if caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+  systemctl reload caddy || true
 else
-    echo "Hugo is already up to date"
+  # If validation fails, do not reload to avoid downtime
+  log "WARNING: Caddyfile validation failed; skipping reload"
+fi
+systemctl reload fail2ban || true
+
+# Determine if reboot is needed
+NEED_REBOOT="no"
+if file_reboot_required || kernel_reboot_required; then
+  NEED_REBOOT="yes"
 fi
 
-echo "Restarting services..."
-systemctl restart php8.2-fpm
-systemctl reload caddy
+if [[ "$NEED_REBOOT" == "yes" ]]; then
+  log "Reboot required"
+  if [[ "$ALLOW_REBOOT" == "yes" ]]; then
+    log "Scheduling reboot in ${REBOOT_DELAY_MIN} minute(s)"
+    /sbin/shutdown -r +"$REBOOT_DELAY_MIN" "AOS weekly maintenance reboot" || {
+      log "Failed to schedule reboot; please reboot manually"
+      exit 1
+    }
+  else
+    log "AUTO-REBOOT DISABLED. Please reboot manually at your convenience."
+  fi
+else
+  log "No reboot required"
+fi
 
-echo "Server update completed"
+log "Weekly maintenance completed"
+exit 0
