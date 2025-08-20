@@ -1,188 +1,192 @@
 #!/bin/bash
+# Lightweight health monitor for Debian 12 on a 2 vCPU / 4 GB VPS
+# Safe to run via systemd timer (every 15 minutes as configured)
+# - Checks: Caddy, PHP-FPM, Fail2ban, UFW
+# - Validates Caddyfile
+# - Disk, inode, memory, swap, load (thresholds adjustable)
+# - TLS cert expiry from Caddy storage
+# - Large per-site log files
+# Exit codes: 0 OK, 1 warnings, 2 critical
 
-# Server monitoring script for Alpha Omega Strategies
-# Runs every 15 minutes via cron to track server health
-# Logs to /var/log/server-monitor.log
+set -euo pipefail
+trap 'echo "$(date -Is) ERROR: monitor failed at line $LINENO" | tee -a "$LOG_FILE"; exit 2' ERR
 
-# Configuration
-LOG_FILE="/var/log/server-monitor.log"
-ALERT_DISK_THRESHOLD=90
-ALERT_MEMORY_THRESHOLD=90
-ALERT_LOAD_THRESHOLD=4.0
+LOG_FILE="/var/log/aos-monitor.log"
+SITES_DIR="/var/www"
+CADDYFILE="/etc/caddy/Caddyfile"
+CADDY_CERT_DIR="/var/lib/caddy"
+CADDY_LOG_DIR="/var/log/caddy"
 
-# Get current timestamp
-DATE=$(date '+%Y-%m-%d %H:%M:%S')
-HOSTNAME=$(hostname)
+# Thresholds
+WARN_DISK=80     # percent
+CRIT_DISK=90
+WARN_INODE=80    # percent
+CRIT_INODE=90
+WARN_MEM_MB=300  # available MB
+CRIT_MEM_MB=150
+WARN_SWAP_MB=256 # used MB
+CRIT_SWAP_MB=512
+LOG_WARN_BYTES=$((1024*1024*1024)) # 1 GiB single log file warning
+CERT_WARN_DAYS=21
+CERT_CRIT_DAYS=7
 
-# Function to log messages
-log_message() {
-    echo "[$DATE] $1" >> "$LOG_FILE"
-}
+# Helpers
+log() { echo "$(date -Is) $*" | tee -a "$LOG_FILE"; }
+pct() { awk 'BEGIN{printf "%.0f",('"$1"'*100)/'"$2"'}'; }
 
-# Check disk space usage
-get_disk_usage() {
-    df -h / | awk 'NR==2 {print $5}' | sed 's/%//'
-}
+ensure_log() { install -d -m 755 "$(dirname "$LOG_FILE")"; : > /dev/null; }
 
-# Check memory usage percentage
-get_memory_usage() {
-    free | grep Mem | awk '{printf "%.1f", ($3/$2) * 100.0}'
-}
+oklist=()
+warnlist=()
+critlist=()
 
-# Check load average (1 minute)
-get_load_average() {
-    uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | xargs
-}
+add_ok()   { oklist+=("$1"); }
+add_warn() { warnlist+=("$1"); }
+add_crit() { critlist+=("$1"); }
 
-# Check if a service is running
 check_service() {
-    systemctl is-active "$1" 2>/dev/null || echo "inactive"
-}
-
-# Check if a port is listening
-check_port() {
-    if ss -tuln | grep -q ":$1 "; then
-        echo "listening"
+  local svc="$1" title="$2"
+  if systemctl is-active --quiet "$svc"; then
+    add_ok "$title running"
+  else
+    # try a light restart; if it still fails, flag critical
+    systemctl try-restart "$svc" >/dev/null 2>&1 || true
+    if systemctl is-active --quiet "$svc"; then
+      add_warn "$title was down, restarted"
     else
-        echo "not-listening"
+      add_crit "$title not running"
     fi
+  fi
 }
 
-# Get system metrics
-DISK_USAGE=$(get_disk_usage)
-MEMORY_USAGE=$(get_memory_usage)
-LOAD_AVG=$(get_load_average)
+bytes_to_mb() { awk 'BEGIN{printf "%.0f",('"$1"'/1048576)}'; }
 
-# Check critical services
-CADDY_STATUS=$(check_service caddy)
-PHP_STATUS=$(check_service php8.2-fpm)
-FAIL2BAN_STATUS=$(check_service fail2ban)
-CRON_STATUS=$(check_service cron)
+cert_days_left() {
+  # Prints "CN daysleft" per cert, or nothing if openssl missing
+  command -v openssl >/dev/null 2>&1 || return 0
+  find "$CADDY_CERT_DIR" -type f -name '*.crt' 2>/dev/null | while read -r crt; do
+    local end notafter tsnow tsend days cn
+    notafter="$(openssl x509 -noout -enddate -in "$crt" 2>/dev/null | sed 's/notAfter=//')"
+    [[ -n "$notafter" ]] || continue
+    tsnow=$(date -u +%s)
+    tsend=$(date -u -d "$notafter" +%s 2>/dev/null || echo 0)
+    [[ "$tsend" -gt 0 ]] || continue
+    days=$(( (tsend - tsnow) / 86400 ))
+    cn="$(openssl x509 -noout -subject -in "$crt" 2>/dev/null | sed -n 's/^subject=.*CN=\([^/]*\).*$/\1/p')"
+    echo "$cn $days"
+  done
+}
 
-# Check ports
-HTTP_PORT=$(check_port 80)
-HTTPS_PORT=$(check_port 443)
-SSH_PORT=$(check_port 22)
+# Main
+ensure_log
 
-# Count active sites (directories in /var/www excluding form handler)
-ACTIVE_SITES=$(find /var/www -maxdepth 1 -type d | grep -v "^/var/www$" | wc -l)
+# Single-run lock
+exec 9>/var/lock/server-monitor.lock
+flock -n 9 || { log "Another monitor run is in progress, exiting"; exit 0; }
 
-# Log basic status
-log_message "STATS: Disk=${DISK_USAGE}% Memory=${MEMORY_USAGE}% Load=${LOAD_AVG} Sites=${ACTIVE_SITES} Services=[Caddy:${CADDY_STATUS} PHP:${PHP_STATUS} Fail2Ban:${FAIL2BAN_STATUS}] Ports=[80:${HTTP_PORT} 443:${HTTPS_PORT} 22:${SSH_PORT}]"
+# Services
+check_service caddy "Caddy"
+check_service php8.2-fpm "PHP-FPM"
+check_service fail2ban "Fail2ban"
 
-# Alert conditions
-ALERTS_TRIGGERED=false
-
-# Disk space alert
-if [ "$DISK_USAGE" -gt "$ALERT_DISK_THRESHOLD" ]; then
-    log_message "ALERT: High disk usage at ${DISK_USAGE}% (threshold: ${ALERT_DISK_THRESHOLD}%)"
-    ALERTS_TRIGGERED=true
-fi
-
-# Memory usage alert
-if [ "$(echo "$MEMORY_USAGE > $ALERT_MEMORY_THRESHOLD" | bc -l)" -eq 1 ]; then
-    log_message "ALERT: High memory usage at ${MEMORY_USAGE}% (threshold: ${ALERT_MEMORY_THRESHOLD}%)"
-    ALERTS_TRIGGERED=true
-fi
-
-# Load average alert
-if [ "$(echo "$LOAD_AVG > $ALERT_LOAD_THRESHOLD" | bc -l)" -eq 1 ]; then
-    log_message "ALERT: High load average at ${LOAD_AVG} (threshold: ${ALERT_LOAD_THRESHOLD})"
-    ALERTS_TRIGGERED=true
-fi
-
-# Service status alerts
-if [ "$CADDY_STATUS" != "active" ]; then
-    log_message "ALERT: Caddy web server is not running (status: ${CADDY_STATUS})"
-    ALERTS_TRIGGERED=true
-fi
-
-if [ "$PHP_STATUS" != "active" ]; then
-    log_message "ALERT: PHP-FPM is not running (status: ${PHP_STATUS})"
-    ALERTS_TRIGGERED=true
-fi
-
-if [ "$FAIL2BAN_STATUS" != "active" ]; then
-    log_message "ALERT: Fail2Ban is not running (status: ${FAIL2BAN_STATUS})"
-    ALERTS_TRIGGERED=true
-fi
-
-# Port alerts
-if [ "$HTTP_PORT" != "listening" ]; then
-    log_message "ALERT: HTTP port 80 not listening"
-    ALERTS_TRIGGERED=true
-fi
-
-if [ "$HTTPS_PORT" != "listening" ]; then
-    log_message "ALERT: HTTPS port 443 not listening"
-    ALERTS_TRIGGERED=true
-fi
-
-if [ "$SSH_PORT" != "listening" ]; then
-    log_message "ALERT: SSH port 22 not listening"
-    ALERTS_TRIGGERED=true
-fi
-
-# Check for failed login attempts (if fail2ban is working)
-if [ "$FAIL2BAN_STATUS" = "active" ]; then
-    BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned:" | awk '{print $4}' || echo "0")
-    if [ "$BANNED_IPS" -gt 0 ]; then
-        log_message "INFO: Fail2Ban has $BANNED_IPS IP(s) currently banned"
-    fi
-fi
-
-# Check certificate expiration for sites (once per day at 02:00)
-CURRENT_HOUR=$(date +%H)
-CURRENT_MINUTE=$(date +%M)
-if [ "$CURRENT_HOUR" = "02" ] && [ "$CURRENT_MINUTE" -lt "15" ]; then
-    log_message "INFO: Starting daily SSL certificate check"
-    
-    # Get all domains from Caddyfile
-    if [ -f "/etc/caddy/Caddyfile" ] && command -v openssl >/dev/null 2>&1; then
-        grep -E "^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,} {" /etc/caddy/Caddyfile | awk '{print $1}' | while read DOMAIN; do
-            if [ -n "$DOMAIN" ]; then
-                # Simple certificate check (30 days warning)
-                CERT_STATUS=$(echo | timeout 10 openssl s_client -servername "$DOMAIN" -connect "$DOMAIN:443" 2>/dev/null | openssl x509 -noout -checkend $((30*86400)) 2>/dev/null && echo "OK" || echo "EXPIRING")
-                
-                if [ "$CERT_STATUS" = "EXPIRING" ]; then
-                    log_message "ALERT: SSL certificate for $DOMAIN expires within 30 days"
-                    ALERTS_TRIGGERED=true
-                fi
-            fi
-        done
-    fi
-fi
-
-# Check available updates (once per day at 03:00)
-if [ "$CURRENT_HOUR" = "03" ] && [ "$CURRENT_MINUTE" -lt "15" ]; then
-    log_message "INFO: Checking for available updates"
-    
-    # Check for package updates
-    UPDATE_COUNT=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo "1")
-    if [ "$UPDATE_COUNT" -gt 1 ]; then  # Subtract 1 for header line
-        ACTUAL_UPDATES=$((UPDATE_COUNT - 1))
-        log_message "INFO: $ACTUAL_UPDATES package updates available"
-    fi
-    
-    # Check Hugo version
-    if command -v hugo >/dev/null 2>&1; then
-        CURRENT_HUGO=$(hugo version 2>/dev/null | grep -o 'v[0-9.]*' | head -1 | sed 's/v//')
-        LATEST_HUGO=$(curl -s https://api.github.com/repos/gohugoio/hugo/releases/latest | grep "tag_name" | cut -d '"' -f 4 | sed 's/v//' 2>/dev/null || echo "unknown")
-        
-        if [ "$CURRENT_HUGO" != "$LATEST_HUGO" ] && [ "$LATEST_HUGO" != "unknown" ]; then
-            log_message "INFO: Hugo update available: $CURRENT_HUGO -> $LATEST_HUGO"
-        fi
-    fi
-fi
-
-# Summary for this monitoring cycle
-if [ "$ALERTS_TRIGGERED" = true ]; then
-    log_message "SUMMARY: Monitoring completed with ALERTS - review above messages"
-    exit 1
+# UFW status
+if ufw status | grep -q "^Status: active"; then
+  add_ok "UFW active"
 else
-    # Only log summary every hour to reduce log size
-    if [ "$(date +%M)" -lt "15" ]; then
-        log_message "SUMMARY: All systems normal - $ACTIVE_SITES sites active"
-    fi
-    exit 0
+  add_warn "UFW not active"
 fi
+
+# Caddyfile validation
+if caddy validate --config "$CADDYFILE" >/dev/null 2>&1; then
+  add_ok "Caddyfile valid"
+else
+  add_crit "Caddyfile validation failed"
+fi
+
+# Disk and inode checks for key mounts
+for m in / /var /var/log /var/www /var/backups; do
+  [[ -d "$m" ]] || continue
+  read -r fs size used avail pcent mount <<<"$(df -P "$m" | awk 'NR==2{print $1,$2,$3,$4,$5,$6}')"
+  p=${pcent%\%}
+  if (( p >= CRIT_DISK )); then add_crit "Disk $m at ${p}%"; 
+  elif (( p >= WARN_DISK )); then add_warn "Disk $m at ${p}%"; 
+  else add_ok "Disk $m at ${p}%"; fi
+
+  read -r ifs i_inodes i_used i_free ipcent imount <<<"$(df -Pi "$m" | awk 'NR==2{print $1,$2,$3,$4,$5,$6}')"
+  ip=${ipcent%\%}
+  if (( ip >= CRIT_INODE )); then add_crit "Inodes $m at ${ip}%"; 
+  elif (( ip >= WARN_INODE )); then add_warn "Inodes $m at ${ip}%"; 
+  else add_ok "Inodes $m at ${ip}%"; fi
+done
+
+# Memory and swap
+read -r mem_total mem_free mem_avail <<<"$(awk '/MemTotal|MemFree|MemAvailable/ {gsub(/ kB/,""); a[$1]=$2} END{print a["MemTotal:"],a["MemFree:"],a["MemAvailable:"]}' /proc/meminfo)"
+avail_mb=$(( mem_avail / 1024 ))
+if (( avail_mb <= CRIT_MEM_MB )); then add_crit "Memory available ${avail_mb}MB"; 
+elif (( avail_mb <= WARN_MEM_MB )); then add_warn "Memory available ${avail_mb}MB"; 
+else add_ok "Memory available ${avail_mb}MB"; fi
+
+read -r swap_total swap_used swap_free <<<"$(awk '/SwapTotal|SwapFree/ {gsub(/ kB/,""); a[$1]=$2} END{u=a["SwapTotal:"]-a["SwapFree:"]; printf "%s %s %s", a["SwapTotal:"], u, a["SwapFree:"]}' /proc/meminfo)"
+swap_used_mb=$(( swap_used / 1024 ))
+if (( swap_used_mb >= CRIT_SWAP_MB )); then add_warn "Swap used ${swap_used_mb}MB"; 
+elif (( swap_used_mb >= WARN_SWAP_MB )); then add_warn "Swap used ${swap_used_mb}MB"; 
+else add_ok "Swap used ${swap_used_mb}MB"; fi
+
+# Load vs cores
+cores=$(nproc)
+la1=$(awk '{print int($1+0.5)}' /proc/loadavg)
+# Rough guide: warn if 1-min load > 2x cores
+if (( la1 > cores*2 )); then add_warn "High load 1m=${la1} cores=${cores}"; else add_ok "Load 1m=${la1} cores=${cores}"; fi
+
+# TLS certificate expiry from Caddy storage
+if [[ -d "$CADDY_CERT_DIR" ]] && command -v openssl >/dev/null 2>&1; then
+  while read -r dom days; do
+    [[ -n "$dom" && "$days" =~ ^-?[0-9]+$ ]] || continue
+    if (( days <= CERT_CRIT_DAYS )); then
+      add_crit "Cert for $dom expires in ${days} day(s)"
+    elif (( days <= CERT_WARN_DAYS )); then
+      add_warn "Cert for $dom expires in ${days} day(s)"
+    else
+      add_ok "Cert $dom ${days}d left"
+    fi
+  done < <(cert_days_left)
+else
+  add_warn "Cert check skipped (no openssl or cert store not found)"
+fi
+
+# Oversized log files (rotation sanity)
+if [[ -d "$CADDY_LOG_DIR" ]]; then
+  while IFS= read -r -d '' f; do
+    sz=$(stat -c%s "$f")
+    if (( sz > LOG_WARN_BYTES )); then
+      add_warn "Large log $(basename "$f") $(bytes_to_mb "$sz")MB"
+    fi
+  done < <(find "$CADDY_LOG_DIR" -type f -name '*.log' -print0 2>/dev/null)
+fi
+
+# Fail2ban summary
+if command -v fail2ban-client >/dev/null 2>&1; then
+  if fail2ban-client ping >/dev/null 2>&1; then
+    jails=$(fail2ban-client status 2>/dev/null | awk -F': ' '/Jail list:/ {print $2}')
+    [[ -n "$jails" ]] && add_ok "Fail2ban jails: $jails" || add_warn "Fail2ban has no jails"
+  else
+    add_warn "Fail2ban not responding to client"
+  fi
+fi
+
+# Summary and exit code
+status=0
+[[ ${#critlist[@]} -gt 0 ]] && status=2 || { [[ ${#warnlist[@]} -gt 0 ]] && status=1 || status=0; }
+
+log "----- AOS monitor report begin -----"
+if [[ ${#critlist[@]} -gt 0 ]]; then
+  for m in "${critlist[@]}"; do log "CRIT: $m"; done
+fi
+if [[ ${#warnlist[@]} -gt 0 ]]; then
+  for m in "${warnlist[@]}"; do log "WARN: $m"; done
+fi
+for m in "${oklist[@]}"; do log "OK: $m"; done
+log "Status code: $status"
+log "----- AOS monitor report end -----"
+
+exit "$status"
