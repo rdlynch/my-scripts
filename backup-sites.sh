@@ -1,168 +1,141 @@
 #!/bin/bash
+# Back up all sites under /var/www to /var/backups/sites
+# - Detects site type (Hugo vs Grav) automatically
+# - Hugo: archives only /public (you build locally)
+# - Grav: archives full site but excludes cache and site-level backups
+# - Throttled with nice/ionice, single-run lock to avoid overlap
+# - Verifies archive, writes SHA256, and prunes old backups
+#
+# Usage: backup-sites (run as root; invoked by systemd timer)
 
-# Automated backup script for Alpha Omega Strategies server
-# Backs up all sites, databases, and configurations
-# Keeps 14 days of backups as specified
+set -euo pipefail
+trap 'echo "ERROR: backup failed at line $LINENO" >&2' ERR
 
-set -e
+# -------- Config --------
+SITES_DIR="/var/www"
+DEST_BASE="/var/backups/sites"
+RETENTION_DAYS="${RETENTION_DAYS:-14}"      # delete archives older than N days
+UMASK_VALUE="027"
 
-# Configuration
-BACKUP_DIR="/var/backups/sites"
-DATE=$(date +%Y-%m-%d_%H-%M-%S)
-KEEP_DAYS=14
-LOG_FILE="/var/log/backup.log"
+# Compression: prefer zstd if available, else gzip
+if command -v zstd >/dev/null 2>&1 && tar --help 2>&1 | grep -q -- '--zstd'; then
+  TAR_COMP="--zstd"
+  EXT="tar.zst"
+  VERIFY_CMD() { zstd -t "$1" >/dev/null; }       # test archive
+else
+  TAR_COMP="--gzip"
+  EXT="tar.gz"
+  VERIFY_CMD() { gzip -t "$1" >/dev/null; }       # test via gzip
+fi
 
-# Function to log messages
-log_message() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+# -------- Helpers --------
+log() { echo "$(date -Is) $*"; }
+ensure_dir() { install -d -m "$2" "$1"; }
+
+# Detects Grav vs Hugo
+# Grav: root contains index.php and user/
+# Hugo: <site>/public exists and root does NOT contain index.php
+detect_type() {
+  local root="$1"
+  if [[ -f "$root/index.php" && -d "$root/user" ]]; then
+    echo "grav"
+  elif [[ -d "$root/public" && ! -f "$root/index.php" ]]; then
+    echo "hugo"
+  else
+    echo "unknown"
+  fi
 }
 
-log_message "Starting backup process..."
+# Returns a space-separated list of --exclude patterns relative to /var/www
+grav_excludes() {
+  local domain="$1"
+  # Exclude transient or redundant data
+  echo "--exclude=${domain}/cache --exclude=${domain}/backup"
+}
 
-# Create backup directory for this run
-CURRENT_BACKUP="$BACKUP_DIR/$DATE"
-mkdir -p "$CURRENT_BACKUP"
+archive_site() {
+  local domain="$1"
+  local sroot="${SITES_DIR}/${domain}"
+  local dest_dir="${DEST_BASE}/${domain}"
+  ensure_dir "$dest_dir" 750
 
-# Track backup success
-BACKUP_SUCCESS=true
+  local ts
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
 
-# Backup each website
-log_message "Backing up websites..."
-SITE_COUNT=0
+  local archive="${dest_dir}/${domain}-${ts}.${EXT}"
+  local type
+  type=$(detect_type "$sroot")
 
-for SITE_PATH in /var/www/*/; do
-    if [ -d "$SITE_PATH" ]; then
-        SITENAME=$(basename "$SITE_PATH")
-        
-        # Skip if it's just the form handler
-        if [ "$SITENAME" = "form-handler.php" ]; then
-            continue
-        fi
-        
-        log_message "Backing up site: $SITENAME"
-        
-        # Create compressed archive
-        if tar -czf "$CURRENT_BACKUP/${SITENAME}.tar.gz" -C "/var/www" "$SITENAME" 2>/dev/null; then
-            SITE_SIZE=$(du -h "$CURRENT_BACKUP/${SITENAME}.tar.gz" | cut -f1)
-            log_message "  SUCCESS: $SITENAME backed up successfully ($SITE_SIZE)"
-            ((SITE_COUNT++))
-        else
-            log_message "  ERROR: Failed to backup $SITENAME"
-            BACKUP_SUCCESS=false
-        fi
-    fi
+  case "$type" in
+    hugo)
+      if [[ ! -d "$sroot/public" ]]; then
+        log "WARN: $domain looks like Hugo but public/ missing, skipping"
+        return 0
+      fi
+      log "Backing up HUGO site $domain"
+      ionice -c2 -n7 nice -n 10 \
+        tar ${TAR_COMP} -cf "$archive" -C "$sroot" public
+      ;;
+    grav)
+      log "Backing up GRAV site $domain"
+      # Use -C /var/www so the archive contains "<domain>/*"
+      # Exclude cache and site backups to reduce size
+      local ex
+      ex=$(grav_excludes "$domain")
+      # shellcheck disable=SC2086
+      ionice -c2 -n7 nice -n 10 \
+        tar ${TAR_COMP} -cf "$archive" -C "$SITES_DIR" $ex "$domain"
+      ;;
+    *)
+      log "INFO: $domain type unknown, skipping"
+      return 0
+      ;;
+  esac
+
+  # Verify archive and write checksum
+  if VERIFY_CMD "$archive"; then
+    sha256sum "$archive" > "${archive}.sha256"
+    log "OK: $archive"
+  else
+    log "ERROR: verification failed for $archive"
+    rm -f "$archive"
+    return 1
+  fi
+
+  # Prune old archives for this domain
+  find "$dest_dir" -type f -name "${domain}-*.tar.*" -mtime +"$RETENTION_DAYS" -print -delete || true
+  find "$dest_dir" -type f -name "${domain}-*.sha256"  -mtime +"$RETENTION_DAYS" -print -delete || true
+}
+
+# -------- Main --------
+# Single-run lock
+exec 9>/var/lock/backup-sites.lock
+if ! flock -n 9; then
+  log "Another backup run is in progress, exiting"
+  exit 0
+fi
+
+umask "$UMASK_VALUE"
+ensure_dir "$DEST_BASE" 750
+
+# Iterate domains in /var/www
+if [[ ! -d "$SITES_DIR" ]]; then
+  log "No $SITES_DIR found. Nothing to back up."
+  exit 0
+fi
+
+status=0
+shopt -s nullglob
+for path in "$SITES_DIR"/*; do
+  [[ -d "$path" ]] || continue
+  domain=$(basename "$path")
+  # Skip hidden dirs just in case
+  [[ "$domain" =~ ^\. ]] && continue
+
+  if ! archive_site "$domain"; then
+    status=1
+  fi
 done
+shopt -u nullglob
 
-# Backup Caddy configuration
-log_message "Backing up Caddy configuration..."
-if cp /etc/caddy/Caddyfile "$CURRENT_BACKUP/" 2>/dev/null; then
-    log_message "  SUCCESS: Caddyfile backed up successfully"
-else
-    log_message "  ERROR: Failed to backup Caddyfile"
-    BACKUP_SUCCESS=false
-fi
-
-# Backup form handler
-log_message "Backing up form handler..."
-if cp /var/www/form-handler.php "$CURRENT_BACKUP/" 2>/dev/null; then
-    log_message "  SUCCESS: Form handler backed up successfully"
-else
-    log_message "  ERROR: Failed to backup form handler"
-    BACKUP_SUCCESS=false
-fi
-
-# Backup server configuration files
-log_message "Backing up server configurations..."
-CONFIG_BACKUP="$CURRENT_BACKUP/server-configs"
-mkdir -p "$CONFIG_BACKUP"
-
-# List of important config files to backup
-CONFIG_FILES=(
-    "/etc/fail2ban/jail.local"
-    "/etc/fail2ban/filter.d/caddy-auth.conf"
-    "/etc/logrotate.d/caddy-sites"
-    "/root/.form-secrets"
-)
-
-# Dynamic PHP configuration backup
-PHP_INI_PATH=$(find /etc/php -name "php.ini" -path "*/fpm/*" | head -1)
-if [ -n "$PHP_INI_PATH" ]; then
-    CONFIG_FILES+=("$PHP_INI_PATH")
-fi
-
-for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
-    if [ -f "$CONFIG_FILE" ]; then
-        BASENAME=$(basename "$CONFIG_FILE")
-        if cp "$CONFIG_FILE" "$CONFIG_BACKUP/$BASENAME" 2>/dev/null; then
-            log_message "  SUCCESS: $BASENAME backed up"
-        else
-            log_message "  ERROR: Failed to backup $BASENAME"
-        fi
-    else
-        log_message "  WARNING: $CONFIG_FILE not found"
-    fi
-done
-
-# Backup form submission logs (last 30 days only to manage size)
-log_message "Backing up recent form logs..."
-LOGS_BACKUP="$CURRENT_BACKUP/form-logs"
-mkdir -p "$LOGS_BACKUP"
-
-if [ -d "/var/log/forms" ]; then
-    # Find and copy logs from last 30 days
-    find /var/log/forms -name "*.log" -mtime -30 -exec cp --parents {} "$LOGS_BACKUP/" \; 2>/dev/null || true
-    LOG_COUNT=$(find "$LOGS_BACKUP" -name "*.log" | wc -l)
-    log_message "  SUCCESS: $LOG_COUNT recent form log files backed up"
-fi
-
-# Create backup manifest
-cat > "$CURRENT_BACKUP/backup-manifest.txt" << EOF
-Alpha Omega Strategies Server Backup
-Generated: $(date)
-Backup Directory: $CURRENT_BACKUP
-
-Sites Backed Up: $SITE_COUNT
-$(ls -la "$CURRENT_BACKUP"/*.tar.gz 2>/dev/null || echo "No site archives found")
-
-Configuration Files:
-$(ls -la "$CONFIG_BACKUP"/ 2>/dev/null || echo "No config files found")
-
-Form Logs:
-Recent logs from last 30 days backed up to form-logs/
-
-Total Backup Size: $(du -sh "$CURRENT_BACKUP" | cut -f1)
-EOF
-
-# Clean up old backups
-log_message "Cleaning up old backups (keeping $KEEP_DAYS days)..."
-REMOVED_COUNT=0
-
-find "$BACKUP_DIR" -maxdepth 1 -type d -mtime +$KEEP_DAYS -name "20*" | while read OLD_BACKUP; do
-    if rm -rf "$OLD_BACKUP" 2>/dev/null; then
-        log_message "  SUCCESS: Removed old backup: $(basename "$OLD_BACKUP")"
-        ((REMOVED_COUNT++))
-    else
-        log_message "  ERROR: Failed to remove: $(basename "$OLD_BACKUP")"
-    fi
-done
-
-# Calculate final statistics
-TOTAL_SIZE=$(du -sh "$CURRENT_BACKUP" | cut -f1)
-AVAILABLE_BACKUPS=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name "20*" | wc -l)
-
-# Final status
-if [ "$BACKUP_SUCCESS" = true ]; then
-    log_message "Backup completed successfully!"
-    log_message "  Sites backed up: $SITE_COUNT"
-    log_message "  Total size: $TOTAL_SIZE"
-    log_message "  Available backups: $AVAILABLE_BACKUPS"
-    log_message "  Location: $CURRENT_BACKUP"
-    
-    # Update latest symlink for easy access
-    ln -sfn "$CURRENT_BACKUP" "$BACKUP_DIR/latest"
-    
-    exit 0
-else
-    log_message "Backup completed with errors - check log for details"
-    exit 1
-fi
+exit "$status"
