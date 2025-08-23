@@ -1,103 +1,59 @@
-# Caddy Configuration Template for Alpha Omega Strategies
-# This serves as the base configuration for the server
-
-# Global options
 {
-    # Email for Let's Encrypt notifications
+    # Global Caddy options
+
+    # Use your real ACME email so expiring-cert notices arrive
     email rlynch@aostrategies.com
-    
-    # Enable admin API for management
+
+    # Let’s Encrypt production directory
+    acme_ca https://acme-v02.api.letsencrypt.org/directory
+
+    # Keep the admin endpoint local only
     admin localhost:2019
-    
-    # Security settings
+
+    # Reasonable server defaults for a small VPS
     servers {
-        protocols h1 h2
+        # Conservative, explicit timeouts
         timeouts {
-            read_body 10s
-            read_header 5s
-            write 30s
-            idle 2m
+            read_header 10s
+            read_body   30s
+            write       1m
+            idle        2m
         }
+        # Avoid silly header abuse
+        max_header_size 32kb
+
+        # Trust only loopback as a proxy (adjust if you add a real proxy later)
+        trusted_proxies 127.0.0.1/32 ::1
     }
-    
-    # Enable auto HTTPS
-    auto_https on
+
+    # Auto HTTPS is on by default; HTTP gets redirected to HTTPS.
+    # We do not set global logs; each site will log JSON to /var/log/caddy/<domain>.log
+    # as written by create-site.sh, which keeps Fail2ban happy.
 }
 
-# Default site - Grav CMS accessible by IP or unmatched domains
-:80, :443 {
-    root * /var/www/cms
-    php_fastcgi unix//run/php/php8.2-fpm.sock
-    file_server
-    
-    # Security headers for all sites
-    header {
-        # Prevent MIME sniffing
-        X-Content-Type-Options nosniff
-        # Prevent clickjacking
-        X-Frame-Options DENY
-        # XSS protection
-        X-XSS-Protection "1; mode=block"
-        # HSTS for HTTPS
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        # Referrer policy
-        Referrer-Policy "strict-origin-when-cross-origin"
-        # Remove server signature
-        -Server
-        # Content Security Policy (basic)
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
-    }
-    
-    # Enable compression
-    encode gzip
-    
-    # Grav-specific security rules
-    @forbidden {
-        path /*.md /*.txt /*.yaml /*.yml /*.php~ /*.orig /*.bak /*.log
-        path /cache/* /logs/* /tmp/* /backup/* /system/* /vendor/*
-        path /.git/* /.gitignore /.htaccess /.env
-        path /config/* /data/*
-    }
-    respond @forbidden 403
-    
-    # Cache static assets
-    @static {
-        path *.css *.js *.png *.jpg *.jpeg *.gif *.svg *.woff *.woff2 *.ico *.webp
-    }
-    header @static Cache-Control "public, max-age=31536000, immutable"    
-}
+# ------------------------------------------------------------------------------
+# Managed sites are appended below by create-site.sh
+# Do not edit below this line; edits will be lost.
+# ------------------------------------------------------------------------------
 
-# Universal Form Handler - Available on all domains
-handle /form-handler.php {
-    root * /var/www
-    php_fastcgi unix//run/php/php8.2-fpm.sock
-    
-    # Additional security for form handler
-    header {
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        X-XSS-Protection "1; mode=block"
-    }
-}
-
-# Health check endpoint
-handle /health {
-    respond "OK" 200
-}
-
-# Server info endpoint (localhost only)
-handle /server-info {
-    @local {
-        remote_ip 127.0.0.1 ::1
-    }
-    respond @local `Server: {system.hostname}
-Status: Online
-Time: {system.time}
-Version: Caddy {version}`
-    respond "Access denied" 403
-}
-
-##############################################
-# SITE CONFIGURATIONS ADDED BELOW
-# (Generated automatically by create-site.sh)
-##############################################
+# (create-site.sh will append site blocks here, for example:)
+# example.com {
+#     root * /var/www/example.com/public
+#     encode gzip zstd
+#     file_server
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Content-Type-Options "nosniff"
+#         Referrer-Policy "no-referrer-when-downgrade"
+#         X-Frame-Options "SAMEORIGIN"
+#         Permissions-Policy "geolocation=(), microphone=(), camera=()"
+#     }
+#     log {
+#         output file /var/log/caddy/example.com.log {
+#             roll_size 25MiB
+#             roll_keep 14
+#             roll_keep_for 336h
+#         }
+#         format json
+#     }
+# }
