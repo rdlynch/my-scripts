@@ -26,10 +26,10 @@ The setup script hardens SSH, enables UFW, installs Caddy and PHP-FPM 8.2, confi
 Use `create-site` with a domain and type. Hugo uses artifact-only deploys. Grav installs per site.
 
 ```
-sudo create-site theruralgrantguy.com hugo
+sudo create-site domain.com hugo
 ```
 
-This creates `/var/www/theruralgrantguy.com/public`, writes a Caddy block with JSON logging, validates, and reloads Caddy. For Grav, pass `grav` instead of `hugo` and the script installs Grav into the site root, sets safe permissions, wires PHP-FPM, and reloads Caddy.
+This creates `/var/www/domain.com/public`, writes a Caddy block with JSON logging, validates, and reloads Caddy. For Grav, pass `grav` instead of `hugo` and the script installs Grav into the site root, sets safe permissions, wires PHP-FPM, and reloads Caddy.
 
 ## Hugo workflow on Windows 11 (artifact-only)
 
@@ -38,14 +38,14 @@ Create and edit your Hugo project locally, build, then mirror the `public` outpu
 Local example:
 
 ```
-mkdir C:\sites\theruralgrantguy.com
-hugo new site C:\sites\theruralgrantguy.com
-cd C:\sites\theruralgrantguy.com
+mkdir C:\sites\domain.com
+hugo new site C:\sites\domain.com
+cd C:\sites\domain.com
 hugo server -D
 hugo --minify
 ```
 
-Upload the contents of `C:\sites\theruralgrantguy.com\public` to `/var/www/theruralgrantguy.com/public` using WinSCP with a mirror sync. Files are served immediately by Caddy. Nothing runs on the server.
+Upload the contents of `C:\sites\domain.com\public` to `/var/www/domain.com/public` using an FTP/SFTP client with a mirror sync. Files are served immediately by Caddy. Nothing runs on the server.
 
 ## Backups
 
