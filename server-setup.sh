@@ -1,17 +1,20 @@
 #!/bin/bash
-# Debian 12 production setup for Caddy + PHP-FPM + Grav/Hugo hosting
-# Usage: ./server-setup.sh
+# Debian 12 production setup for Caddy + PHP-FPM + Hugo (artifacts only) and per-site Grav
+# Usage: sudo ./server-setup.sh
+# Repo must be cloned at /opt/server-scripts before running.
 
 set -euo pipefail
 trap 'echo "ERROR: Setup failed at line $LINENO"; exit 1' ERR
 
+# ---- Config -------------------------------------------------------------------
 AOS_REPO_DIR="/opt/server-scripts"
 AOS_LOG="/var/log/aos-setup.log"
 AOS_TIMEZONE="America/Chicago"
 
 SITES_DIR="/var/www"
 BACKUP_DIR="/var/backups/sites"
-FORM_LOG_DIR="/var/log/forms"
+FORM_LOG_DIR="/var/log/forms"          # PHP form-handler writes here
+RATE_CACHE_DIR="/var/cache/aos-forms"  # per-IP rate limit cache
 SCRIPT_BIN_DIR="/usr/local/sbin"
 WWW_USER="www-data"
 WWW_GROUP="www-data"
@@ -23,21 +26,23 @@ SWAP_SIZE="4G"
 ENABLE_UFW="yes"
 SSH_PORT="${SSH_PORT:-22}"
 
+# ---- Helpers ------------------------------------------------------------------
 log() { echo "$(date -Is) $*" | tee -a "$AOS_LOG" ; }
 ensure_dir() { install -d -m "$2" "$1"; }
 file_has_line() { grep -qsF "$2" "$1"; }
-
 require_root() { [[ $EUID -eq 0 ]] || { echo "Please run as root" >&2; exit 1; }; }
-require_path() { [[ -d "$AOS_REPO_DIR" ]] || { echo "Repository not found at $AOS_REPO_DIR" >&2; exit 1; }; }
+require_repo() { [[ -d "$AOS_REPO_DIR" ]] || { echo "Repository not found at $AOS_REPO_DIR" >&2; exit 1; }; }
 
+# ---- Start --------------------------------------------------------------------
 require_root
-require_path
+require_repo
 ensure_dir "$(dirname "$AOS_LOG")" 755
 : > "$AOS_LOG"
 
 log "Alpha Omega Strategies server setup starting"
 
 export DEBIAN_FRONTEND=noninteractive
+
 log "Setting timezone to $AOS_TIMEZONE"
 timedatectl set-timezone "$AOS_TIMEZONE" || true
 systemctl enable --now systemd-timesyncd.service
@@ -57,11 +62,12 @@ if apt-cache show php8.2-yaml >/dev/null 2>&1; then
 elif apt-cache show php-yaml >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends php-yaml
 else
-  log "YAML PHP extension not available in repos, continuing without it"
+  log "YAML PHP extension not available; continuing"
 fi
 phpenmod apcu || true
 echo "apc.enable_cli=1" > /etc/php/8.2/cli/conf.d/20-apcu.ini
 
+# Swap (idempotent)
 if [[ "$CREATE_SWAP" == "yes" ]]; then
   if [[ ! -f "$SWAP_FILE" ]]; then
     log "Creating swap $SWAP_FILE $SWAP_SIZE"
@@ -77,6 +83,7 @@ if [[ "$CREATE_SWAP" == "yes" ]]; then
   fi
 fi
 
+# UFW
 if [[ "$ENABLE_UFW" == "yes" ]]; then
   log "Configuring UFW"
   ufw --force reset
@@ -88,6 +95,7 @@ if [[ "$ENABLE_UFW" == "yes" ]]; then
   ufw --force enable
 fi
 
+# SSH hardening
 log "Hardening SSH"
 SSHD=/etc/ssh/sshd_config
 sed -i 's/^[# ]*PasswordAuthentication .*/PasswordAuthentication no/' "$SSHD"
@@ -97,25 +105,27 @@ if ! file_has_line "$SSHD" "ClientAliveInterval 300"; then
 fi
 systemctl reload ssh || true
 
+# Fail2ban
 log "Configuring Fail2ban"
 ensure_dir /etc/fail2ban/jail.d 755
 if [[ -f "$AOS_REPO_DIR/jail.local" ]]; then
   install -m 0644 "$AOS_REPO_DIR/jail.local" /etc/fail2ban/jail.d/aos.local
 fi
-# Correct location for the Caddy auth filter
+# Correct location for Caddy JSON filter
 if [[ -f "$AOS_REPO_DIR/caddy-auth.conf" ]]; then
   install -m 0644 "$AOS_REPO_DIR/caddy-auth.conf" /etc/fail2ban/filter.d/caddy-auth.conf
 fi
 systemctl enable --now fail2ban
 
-log "Enable unattended-upgrades"
+# Unattended upgrades
+log "Enabling unattended-upgrades"
 dpkg-reconfigure --priority=low unattended-upgrades || true
 cat >/etc/apt/apt.conf.d/51aos-unattended.conf <<'EOF'
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "04:30";
 EOF
 
-# Caddy installation from vendor repo
+# Caddy (vendor repo)
 if ! command -v caddy >/dev/null 2>&1; then
   log "Installing Caddy"
   apt-get install -y debian-keyring debian-archive-keyring
@@ -127,16 +137,21 @@ else
   log "Caddy already installed"
 fi
 
-# Ensure Caddy log dir exists for access/error logs
+# Ensure Caddy log dir exists
 install -d -o caddy -g caddy -m 755 /var/log/caddy
 
-log "Tune PHP-FPM for 4GB VPS"
+# PHP-FPM tuning for 4GB node
+log "Tuning PHP-FPM"
 PHP_INI=/etc/php/8.2/fpm/php.ini
 POOL_CONF=/etc/php/8.2/fpm/pool.d/www.conf
 sed -i 's/^;*opcache.enable=.*/opcache.enable=1/' "$PHP_INI"
 sed -i 's/^;*opcache.memory_consumption=.*/opcache.memory_consumption=128/' "$PHP_INI"
 sed -i 's/^;*opcache.max_accelerated_files=.*/opcache.max_accelerated_files=10000/' "$PHP_INI"
 sed -i 's/^;*cgi.fix_pathinfo=.*/cgi.fix_pathinfo=0/' "$PHP_INI"
+# realpath cache helps Grav/Composer autoloaders
+if ! grep -q '^realpath_cache_size' "$PHP_INI"; then echo 'realpath_cache_size = 4096k' >> "$PHP_INI"; else sed -i 's/^;*realpath_cache_size.*/realpath_cache_size = 4096k/' "$PHP_INI"; fi
+if ! grep -q '^realpath_cache_ttl' "$PHP_INI"; then echo 'realpath_cache_ttl = 600' >> "$PHP_INI"; else sed -i 's/^;*realpath_cache_ttl.*/realpath_cache_ttl = 600/' "$PHP_INI"; fi
+# FPM pool (conservative)
 sed -i 's/^pm = .*/pm = dynamic/' "$POOL_CONF"
 sed -i 's/^pm.max_children = .*/pm.max_children = 12/' "$POOL_CONF"
 sed -i 's/^pm.start_servers = .*/pm.start_servers = 3/' "$POOL_CONF"
@@ -144,41 +159,56 @@ sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 2/' "$POOL_CONF"
 sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 6/' "$POOL_CONF"
 systemctl enable --now php8.2-fpm
 
-log "Create standard directories"
+# Standard directories
+log "Creating standard directories"
 ensure_dir "$SITES_DIR" 755
 ensure_dir "$BACKUP_DIR" 750
-ensure_dir "$FORM_LOG_DIR" 750
+# Forms log dir: group www-data, setgid so new files inherit group
+install -d -m 2750 -o root -g www-data "$FORM_LOG_DIR"
+# Rate limit cache for form handler
+install -d -m 2770 -o root -g www-data "$RATE_CACHE_DIR"
 chown -R "$WWW_USER:$WWW_GROUP" "$SITES_DIR"
-chown -R root:root "$BACKUP_DIR" "$FORM_LOG_DIR"
+chown -R root:root "$BACKUP_DIR"
 
-log "Deploy Caddyfile template if present"
+# Deploy Caddyfile template if present
+log "Deploying Caddyfile template (if present)"
 if [[ -f "$AOS_REPO_DIR/caddyfile.template" ]]; then
   install -m 0644 "$AOS_REPO_DIR/caddyfile.template" /etc/caddy/Caddyfile
   if caddy validate --config /etc/caddy/Caddyfile; then
     systemctl enable --now caddy
     systemctl reload caddy || true
   else
-    log "WARNING: Caddyfile validation failed"
+    log "WARNING: Caddyfile validation failed; leaving current config in place"
   fi
 fi
 
-log "Install form handler and secrets template if present"
-[[ -f "$AOS_REPO_DIR/form-handler.php" ]] && install -m 0644 "$AOS_REPO_DIR/form-handler.php" "$SITES_DIR"/form-handler.php && chown "$WWW_USER:$WWW_GROUP" "$SITES_DIR"/form-handler.php
-[[ -f "$AOS_REPO_DIR/form-secrets.template" ]] && install -m 0640 "$AOS_REPO_DIR/form-secrets.template" /etc/aos-form-secrets && chgrp "$WWW_GROUP" /etc/aos-form-secrets || true
+# Install form handler and secrets template if present
+log "Installing form handler and secrets (if present)"
+if [[ -f "$AOS_REPO_DIR/form-handler.php" ]]; then
+  install -m 0644 "$AOS_REPO_DIR/form-handler.php" "$SITES_DIR"/form-handler.php
+  chown "$WWW_USER:$WWW_GROUP" "$SITES_DIR"/form-handler.php
+fi
+if [[ -f "$AOS_REPO_DIR/form-secrets.template" ]]; then
+  install -m 0640 "$AOS_REPO_DIR/form-secrets.template" /etc/aos-form-secrets
+  chgrp "$WWW_GROUP" /etc/aos-form-secrets || true
+fi
 
+# Logrotate for Caddy rotated files
 if [[ -f "$AOS_REPO_DIR/logrotate-caddy-sites" ]]; then
-  log "Install logrotate for Caddy"
+  log "Installing logrotate policy for Caddy rotated logs"
   install -m 0644 "$AOS_REPO_DIR/logrotate-caddy-sites" /etc/logrotate.d/caddy-sites
 fi
 
-log "Symlink management scripts into PATH"
+# Expose helper scripts in PATH (symlinks)
+log "Linking management scripts into $SCRIPT_BIN_DIR"
 install -d -m 755 "$SCRIPT_BIN_DIR"
 ln -sf "$AOS_REPO_DIR/create-site.sh"    "$SCRIPT_BIN_DIR/create-site"
 ln -sf "$AOS_REPO_DIR/backup-sites.sh"   "$SCRIPT_BIN_DIR/backup-sites"
 ln -sf "$AOS_REPO_DIR/server-update.sh"  "$SCRIPT_BIN_DIR/server-update"
 ln -sf "$AOS_REPO_DIR/server-monitor.sh" "$SCRIPT_BIN_DIR/server-monitor"
 
-log "Create systemd timers"
+# Systemd units and timers
+log "Creating systemd services and timers"
 cat >/etc/systemd/system/aos-backup.service <<EOF
 [Unit]
 Description=AOS site backups
@@ -236,15 +266,16 @@ EOF
 systemctl daemon-reload
 systemctl enable --now aos-backup.timer aos-update.timer aos-monitor.timer
 
-log "Apply safe sysctl hardening"
+# Kernel/network hardening (safe defaults)
+log "Applying basic sysctl hardening"
 cat >/etc/sysctl.d/60-aos-hardening.conf <<'EOF'
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
-net.ip4.conf.all.send_redirects = 0
-net.ip4.conf.default.send_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 kernel.kptr_restrict = 2
@@ -252,6 +283,7 @@ kernel.dmesg_restrict = 1
 EOF
 sysctl --system >/dev/null
 
+# Final verification
 log "Verifying services"
 systemctl is-active --quiet caddy && log "Caddy active"
 systemctl is-active --quiet php8.2-fpm && log "PHP-FPM active"
