@@ -207,6 +207,34 @@ ln -sf "$AOS_REPO_DIR/backup-sites.sh"   "$SCRIPT_BIN_DIR/backup-sites"
 ln -sf "$AOS_REPO_DIR/server-update.sh"  "$SCRIPT_BIN_DIR/server-update"
 ln -sf "$AOS_REPO_DIR/server-monitor.sh" "$SCRIPT_BIN_DIR/server-monitor"
 
+# Install helper: aos-reload-safe
+log "Installing helper script: aos-reload-safe"
+cat >/usr/local/sbin/aos-reload-safe <<'EOS'
+#!/bin/bash
+set -euo pipefail
+trap 'echo "ERROR: failed at line $LINENO" >&2' ERR
+
+echo "Applying sysctl..."
+sysctl --system >/dev/null
+
+echo "Validating Caddyfile..."
+if ! caddy validate --config /etc/caddy/Caddyfile; then
+  echo "Caddyfile invalid. Aborting reload." >&2
+  exit 1
+fi
+
+echo "Reloading services..."
+systemctl reload caddy
+systemctl try-restart php8.2-fpm fail2ban >/dev/null
+systemctl restart systemd-timesyncd >/dev/null
+
+echo "Checking timers..."
+systemctl list-timers --all | grep aos- || true
+
+echo "Done."
+EOS
+chmod 0755 /usr/local/sbin/aos-reload-safe
+
 # Systemd units and timers
 log "Creating systemd services and timers"
 cat >/etc/systemd/system/aos-backup.service <<EOF
@@ -295,4 +323,4 @@ echo "Setup complete."
 echo "Sites: $SITES_DIR"
 echo "Backups: $BACKUP_DIR"
 echo "Form logs: $FORM_LOG_DIR"
-echo "Scripts in PATH: create-site, backup-sites, server-update, server-monitor"
+echo "Scripts in PATH: create-site, backup-sites, server-update, server-monitor, aos-reload-safe"
