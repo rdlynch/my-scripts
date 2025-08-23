@@ -1,171 +1,176 @@
-# Alpha Omega Strategies Server Management Scripts
+# Alpha Omega Strategies Server Configuration
 
-Automated server setup and management scripts for Debian 12 with Caddy, Grav CMS, Hugo, and a universal PHP form handler. Designed for accessibility and professional consulting operations.
+## Purpose
 
-## Quick Start
+These scripts provision and manage a small Debian 12 VPS at Linode for accessible, production hosting of static Hugo sites and per-site Grav installs behind Caddy. The design favors security, simplicity, and low maintenance.
 
-Deploy a complete server in under 15 minutes:
+## Conventions and paths
 
-```bash
-cd /root && git clone https://github.com/rdlynch/my-scripts.git && cd my-scripts && chmod +x server-setup.sh && ./server-setup.sh
-```
+The repo is cloned to `/opt/server-scripts`. Sites live in `/var/www/<domain>`. Caddy site logs are JSON at `/var/log/caddy/<domain>.log`. Daily site backups go to `/var/backups/sites/<domain>`. Form logs are in `/var/log/forms`.
 
-## Scripts Overview
+## One-time bootstrap
 
-### Core Management Scripts
-
-- **`server-setup.sh`** - Complete automated Debian 12 server installation
-  - Caddy web server with auto-SSL
-  - PHP 8.2 FPM optimized for performance
-  - Hugo static site generator
-  - Grav CMS (core only, no admin panel for accessibility)
-  - Universal form handler with Postmark/B2 integration
-  - Security hardening (UFW firewall + Fail2Ban)
-  - Automated backups, monitoring, and updates
-
-- **`create-site.sh`** - Create new Grav or Hugo sites with one command
-  - Usage: `create-site domain.com [grav|hugo]`
-  - Automatic theme installation (Hadron for Grav, Clarity for Hugo)
-  - SSL certificate generation
-  - Caddy configuration management
-
-- **`backup-sites.sh`** - Automated daily backups (runs at 2 AM)
-  - All websites and configurations
-  - 14-day retention policy
-  - Form submission logs (30 days)
-  - Compressed archives with manifests
-
-- **`server-monitor.sh`** - System health monitoring (runs every 15 minutes)
-  - Disk, memory, and CPU load monitoring
-  - Service status checks (Caddy, PHP, Fail2Ban)
-  - SSL certificate expiration alerts
-  - Package update notifications
-
-- **`server-update.sh`** - Weekly automated updates (runs Sundays at 4 AM)
-  - System package updates
-  - Hugo version updates
-  - Configuration file synchronization
-  - Service restarts as needed
-
-### Core Components
-
-- **`form-handler.php`** - Universal form processor for all sites
-  - WCAG 2.2 AA compliant
-  - Postmark email integration
-  - Backblaze B2 file storage
-  - Rate limiting and security validation
-  - Works with both Grav and Hugo sites
-
-### Configuration Files
-
-- **`caddyfile.template`** - Base Caddy configuration
-- **`jail.local`** - Fail2Ban security rules
-- **`caddy-auth.conf`** - Fail2Ban filter for Caddy
-- **`logrotate-caddy-sites`** - Log rotation configuration
-- **`form-secrets.template`** - API credentials template
-
-## Server Specifications
-
-**Recommended Hardware:**
-- Linode 2 vCPU, 4GB RAM, 80GB SSD
-- Monthly cost: ~$24
-
-**Stack:**
-- Debian 12 LTS
-- Caddy 2.x (automatic HTTPS)
-- PHP 8.2 FPM
-- Hugo (latest extended)
-- Grav CMS (core only)
-
-## Available Commands
-
-After installation, these aliases are available:
-
-```bash
-create-site domain.com [grav|hugo]  # Create new website
-backup-sites                        # Manual backup
-update-server                       # Manual update
-monitor-server                      # View monitoring log
-check-sites                         # List all sites
-caddy-reload                        # Reload web server
-caddy-logs                          # View web server logs
-```
-
-## Directory Structure
+Linode’s fresh image requires the first three commands by hand. Run:
 
 ```
-/var/www/                   # All websites
-├── cms/                    # Default Grav site (IP access)
-├── sitename/               # Individual sites
-└── form-handler.php        # Universal form processor
-
-/var/backups/sites/         # Daily backups (14 days)
-/var/log/forms/            # Form submissions (5 years)
-/root/my-scripts/          # This repository
+apt update && apt upgrade -y && apt install -y git
+git clone https://example.com/your/repo.git /opt/server-scripts
+cd /opt/server-scripts
+sudo ./server-setup.sh
 ```
 
-## Accessibility Features
+The setup script hardens SSH, enables UFW, installs Caddy and PHP-FPM 8.2, configures Fail2ban, unattended-upgrades, creates standard directories, and installs systemd timers for backups, updates, and monitoring. It deploys the Caddyfile template and optional components if present in the repo.
 
-- **Screen Reader Compatible**: All scripts use accessible text (no Unicode symbols)
-- **JAWS Optimized**: Form handler designed for JAWS for Windows
-- **WCAG 2.2 AA**: All forms and interfaces meet accessibility standards
-- **No Admin Panels**: File-based editing via WinSCP for reliability
+## Creating a site
 
-## Security Features
+Use `create-site` with a domain and type. Hugo uses artifact-only deploys. Grav installs per site.
 
-- **UFW Firewall**: Only ports 22, 80, 443 open
-- **Fail2Ban**: Automatic IP blocking for failed logins
-- **Auto-SSL**: Let's Encrypt certificates with auto-renewal
-- **Rate Limiting**: Form submission protection
-- **Secure Headers**: HSTS, CSP, XSS protection
-- **File Validation**: Strict upload controls
+```
+sudo create-site theruralgrantguy.com hugo
+```
 
-## Form Handler Integration
+This creates `/var/www/theruralgrantguy.com/public`, writes a Caddy block with JSON logging, validates, and reloads Caddy. For Grav, pass `grav` instead of `hugo` and the script installs Grav into the site root, sets safe permissions, wires PHP-FPM, and reloads Caddy.
 
-Add to any HTML page for universal form processing:
+## Hugo workflow on Windows 11 (artifact-only)
 
-```html
+Create and edit your Hugo project locally, build, then mirror the `public` output to the server. No build runs on the VPS.
+
+Local example:
+
+```
+mkdir C:\sites\theruralgrantguy.com
+hugo new site C:\sites\theruralgrantguy.com
+cd C:\sites\theruralgrantguy.com
+hugo server -D
+hugo --minify
+```
+
+Upload the contents of `C:\sites\theruralgrantguy.com\public` to `/var/www/theruralgrantguy.com/public` using WinSCP with a mirror sync. Files are served immediately by Caddy. Nothing runs on the server.
+
+## Backups
+
+Backups run daily at 02:00 via a systemd timer. The script detects site type and includes only what matters. Hugo backups archive `/public` because you build locally. Grav backups archive the whole site and exclude cache and on-site backups to reduce size. Each archive is verified, a SHA256 is written, and anything older than 14 days is pruned. The script throttles disk activity so it does not fight Caddy or PHP-FPM.
+
+Manual run:
+
+```
+sudo backup-sites
+```
+
+Restore is straightforward. Extract the archive for the target domain back into `/var/www/<domain>` or its `public` folder for Hugo, then set ownership to `www-data:www-data` and permissions to 755 on directories and 644 on files. Reload Caddy if you restored a Grav site and adjusted PHP routing.
+
+## Updates and weekly maintenance
+
+Automatic weekly updates run Sunday at 04:00. The script performs `apt full-upgrade`, validates the Caddyfile before reload, and restarts PHP-FPM and Fail2ban. If a new kernel is present or a reboot flag exists, it schedules a reboot a few minutes out. You can disable auto-reboot by setting `ALLOW_REBOOT=no` on the unit or environment.
+
+Manual run:
+
+```
+sudo server-update
+```
+
+Logs are in `/var/log/aos-update.log`.
+
+## Monitoring
+
+The monitor timer runs every 15 minutes. It checks Caddy, PHP-FPM, Fail2ban, UFW, validates the Caddyfile, inspects disk and inode usage, free memory and swap, load vs core count, looks for oversize Caddy logs, and evaluates TLS expiry from Caddy’s cert store. Results are written to `/var/log/aos-monitor.log`. Non-zero exit codes indicate warnings or critical issues, which you can wire to alerts later.
+
+Manual run:
+
+```
+sudo server-monitor
+```
+
+## Security controls
+
+SSH is configured to disallow password auth and prohibit direct root login by password. UFW only allows SSH, HTTP, and HTTPS. Fail2ban protects SSH and Caddy endpoints. The Caddy admin API binds to localhost. PHP-FPM is tuned conservatively for a 4 GB node with OPcache enabled. JSON access logs per site enable precise Fail2ban filtering.
+
+## Fail2ban and Caddy logs
+
+Caddy writes JSON logs under `/var/log/caddy/<domain>.log`, with rotation handled by Caddy itself. Logrotate compresses and ages out rotated files without touching the active ones. The `caddy-auth` jail bans repeat 401 or 403 responses and blocks scanners probing paths like `/.env` or `/wp-login.php`.
+
+Basic checks:
+
+```
+sudo fail2ban-client status caddy-auth
+sudo fail2ban-regex /var/log/caddy/theruralgrantguy.com.log /etc/fail2ban/filter.d/caddy-auth.conf --print-all-matched
+```
+
+## Forms and email
+
+The secure form handler is installed at `/var/www/form-handler.php`. Configuration lives at `/etc/aos-form-secrets` and controls recipients, origin checks, anti-abuse, logging, and email transport. Default transport is the Postmark HTTP API with automatic SMTP fallback using the same Server token.
+
+Minimal form example:
+
+```
 <form action="/form-handler.php" method="post" enctype="multipart/form-data">
-    <input type="email" name="email" required>
-    <textarea name="message" required></textarea>
-    <input type="file" name="attachment" accept=".pdf,.doc,.docx">
-    <button type="submit">Send</button>
+  <label>Name <input name="name" required></label>
+  <label>Email <input name="email" type="email" required></label>
+  <label>Message <textarea name="message" required></textarea></label>
+  <input type="text" name="website" autocomplete="off" tabindex="-1" aria-hidden="true" style="position:absolute;left:-10000px;">
+  <input type="hidden" name="ts" id="ts">
+  <button type="submit">Send</button>
 </form>
+<script>document.getElementById('ts').value = Math.floor(Date.now()/1000);</script>
 ```
 
-Features:
-- Email delivery via Postmark
-- File uploads to Backblaze B2
-- Automatic logging and tracking
-- JSON responses for AJAX integration
+The handler returns JSON with clear HTTP codes. Use curl for a quick test:
 
-## Configuration
+```
+curl -i -X POST https://theruralgrantguy.com/form-handler.php \
+  -d "name=Test User" -d "email=you@example.com" -d "message=Hello"
+```
 
-1. **Set API credentials**: `nano /root/.form-secrets`
-2. **Create first site**: `create-site yourdomain.com grav`
-3. **Point DNS** to your server IP
-4. **SSL certificates** generate automatically
+Logs are JSON lines at `/var/log/forms/contact.log` with sensitive fields redacted.
 
-## Professional Use Case
+## DNS and TLS
 
-Designed specifically for Alpha Omega Strategies' government contracting and rural development consulting practice:
+Point the domain’s A record to the VPS. CNAME `www` to the apex if needed. Caddy manages certificate issuance and renewal automatically using Let’s Encrypt, with your ACME email set in the global `Caddyfile`. Certificate expiry is checked by the monitor and will be logged if the remaining days drop below thresholds.
 
-- **Client Websites**: Professional Grav sites with accessible themes
-- **Project Documentation**: Hugo sites for fast, static content
-- **Form Processing**: Secure contact forms with file uploads
-- **Compliance Ready**: WCAG 2.2 AA accessibility standards
-- **Low Maintenance**: Automated backups, updates, and monitoring
+## Optional cloud backup to Backblaze B2
 
-## Support
+If you want off-site copies of archives, use rclone with a bucket-scoped Application Key. Store the rclone config at `/root/.config/rclone/rclone.conf` with 0600 permissions. Use `/etc/aos-backup.env` for non-secret settings like the remote name and path prefix. After you add these, the backup script can push verified tarballs to B2 at the end of a successful run. This is optional and not enabled by default.
 
-This is a personal server management system. Scripts are provided as-is for educational and professional use.
+## Troubleshooting
 
-**Best Practices:**
-- Test on staging before production
-- Keep API credentials secure
-- Monitor logs regularly
-- Backup before major changes
+Validate the Caddyfile before any manual reloads:
 
----
+```
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
 
-**Built for accessibility, reliability, and professional consulting operations.**
+Check timers:
+
+```
+systemctl list-timers | grep aos-
+```
+
+Review service status:
+
+```
+systemctl status caddy php8.2-fpm fail2ban
+```
+
+Inspect recent monitor entries for early warnings:
+
+```
+tail -200 /var/log/aos-monitor.log
+```
+
+## Accessibility notes
+
+Admin output is plain text with clear headings and no decorative characters. JSON logs are line-delimited for reliable screen reader parsing. The sample form uses visible labels, proper field types, and avoids visual-only cues. CAPTCHA is optional and can be set to Turnstile, hCaptcha, reCAPTCHA, or none in the secrets file. Start with all non-CAPTCHA defenses and only enable a provider if real abuse appears.
+
+## Script index
+
+`server-setup.sh` provisions the server and installs timers.
+`create-site.sh` creates either a Hugo site (artifact-only) or a Grav site per domain.
+`backup-sites.sh` archives sites safely with verification and retention.
+`server-update.sh` runs weekly maintenance with controlled reloads and reboot logic.
+`server-monitor.sh` checks health and resources on a 15-minute schedule.
+`jail.local` enables SSH, Caddy auth, and recidive jails.
+`caddy-auth.conf` matches auth failures and scanner probes in JSON logs.
+`logrotate-caddy-sites` compresses and ages out rotated logs without touching actives.
+`form-secrets.template` configures the handler, email transport, anti-abuse, and logging.
+`form-handler.php` validates, rate limits, verifies optional CAPTCHA, sends via Postmark HTTP API with SMTP fallback, and logs outcomes.
