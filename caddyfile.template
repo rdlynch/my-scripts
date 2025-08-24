@@ -1,59 +1,22 @@
 {
-    # Global Caddy options
-
-    # Use your real ACME email so expiring-cert notices arrive
     email rlynch@aostrategies.com
-
-    # Let’s Encrypt production directory
     acme_ca https://acme-v02.api.letsencrypt.org/directory
 
-    # Keep the admin endpoint local only
     admin localhost:2019
 
-    # Reasonable server defaults for a small VPS
     servers {
-        # Conservative, explicit timeouts
         timeouts {
             read_header 10s
             read_body   30s
             write       1m
             idle        2m
         }
-        # Avoid silly header abuse
         max_header_size 32kb
-
-        # Trust only loopback as a proxy (adjust if you add a real proxy later)
         trusted_proxies 127.0.0.1/32 ::1
     }
-
-    # Auto HTTPS is on by default; HTTP gets redirected to HTTPS.
-    # We do not set global logs; each site will log JSON to /var/log/caddy/<domain>.log
-    # as written by create-site.sh, which keeps Fail2ban happy.
 }
 
-# ------------------------------------------------------------------------------
-# Managed sites are appended below by create-site.sh
-# Do not edit below this line; edits will be lost.
-# ------------------------------------------------------------------------------
-
-# (create-site.sh will append site blocks here, for example:)
-# example.com {
-#     root * /var/www/example.com/public
-#     encode gzip zstd
-#     file_server
-#     header {
-#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-#         X-Content-Type-Options "nosniff"
-#         Referrer-Policy "no-referrer-when-downgrade"
-#         X-Frame-Options "SAMEORIGIN"
-#         Permissions-Policy "geolocation=(), microphone=(), camera=()"
-#     }
-#     log {
-#         output file /var/log/caddy/example.com.log {
-#             roll_size 25MiB
-#             roll_keep 14
-#             roll_keep_for 336h
-#         }
-#         format json
-#     }
-# }
+# --------------------------------------------------------------------
+# DO NOT add domains here.
+# create-site.sh appends site blocks below this line automatically.
+# --------------------------------------------------------------------
