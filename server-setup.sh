@@ -1,20 +1,15 @@
 #!/bin/bash
-# Debian 12 production setup for Caddy + PHP-FPM + Hugo (artifacts only) and per-site Grav
-# Usage: sudo ./server-setup.sh
-# Repo must be cloned at /opt/server-scripts before running.
-
 set -euo pipefail
 trap 'echo "ERROR: Setup failed at line $LINENO"; exit 1' ERR
 
-# ---- Config -------------------------------------------------------------------
 AOS_REPO_DIR="/opt/server-scripts"
 AOS_LOG="/var/log/aos-setup.log"
 AOS_TIMEZONE="America/Chicago"
 
 SITES_DIR="/var/www"
 BACKUP_DIR="/var/backups/sites"
-FORM_LOG_DIR="/var/log/forms"          # PHP form-handler writes here
-RATE_CACHE_DIR="/var/cache/aos-forms"  # per-IP rate limit cache
+FORM_LOG_DIR="/var/log/forms"
+RATE_CACHE_DIR="/var/cache/aos-forms"
 SCRIPT_BIN_DIR="/usr/local/sbin"
 WWW_USER="www-data"
 WWW_GROUP="www-data"
@@ -26,26 +21,19 @@ SWAP_SIZE="4G"
 ENABLE_UFW="yes"
 SSH_PORT="${SSH_PORT:-22}"
 
-# ---- Helpers ------------------------------------------------------------------
 log() { echo "$(date -Is) $*" | tee -a "$AOS_LOG" ; }
 ensure_dir() { install -d -m "$2" "$1"; }
 file_has_line() { grep -qsF "$2" "$1"; }
 require_root() { [[ $EUID -eq 0 ]] || { echo "Please run as root" >&2; exit 1; }; }
 require_repo() { [[ -d "$AOS_REPO_DIR" ]] || { echo "Repository not found at $AOS_REPO_DIR" >&2; exit 1; }; }
 
-# ---- Start --------------------------------------------------------------------
 require_root
 require_repo
 ensure_dir "$(dirname "$AOS_LOG")" 755
 : > "$AOS_LOG"
 
 log "Alpha Omega Strategies server setup starting"
-
 export DEBIAN_FRONTEND=noninteractive
-
-log "Setting timezone to $AOS_TIMEZONE"
-timedatectl set-timezone "$AOS_TIMEZONE" || true
-systemctl enable --now systemd-timesyncd.service
 
 log "apt update and base packages"
 apt-get update -y
@@ -53,19 +41,24 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl wget unzip tar gnupg ufw fail2ban \
   software-properties-common apt-transport-https lsb-release \
   unattended-upgrades logrotate jq zip bzip2 rsync \
+  systemd-timesyncd \
   php8.2-cli php8.2-fpm php8.2-curl php8.2-xml php8.2-zip php8.2-mbstring \
   php8.2-gd php8.2-intl php8.2-bcmath php8.2-opcache php-apcu
 
-# Optional but beneficial for Grav if available
+# Add YAML extension for Grav if the package exists
 if apt-cache show php8.2-yaml >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends php8.2-yaml
 elif apt-cache show php-yaml >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends php-yaml
-else
-  log "YAML PHP extension not available; continuing"
 fi
+
+# Enable APCu explicitly (helps Grav and keeps CLI tools fast)
 phpenmod apcu || true
 echo "apc.enable_cli=1" > /etc/php/8.2/cli/conf.d/20-apcu.ini
+
+log "Setting timezone and enabling NTP"
+timedatectl set-timezone "$AOS_TIMEZONE" || true
+timedatectl set-ntp true || true
 
 # Swap (idempotent)
 if [[ "$CREATE_SWAP" == "yes" ]]; then
