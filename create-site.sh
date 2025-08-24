@@ -1,7 +1,6 @@
 #!/bin/bash
 # Create a new site on Debian 12 with Caddy + PHP-FPM
 # Usage: create-site domain.com [grav|hugo]
-# Example: create-site theruralgrantguy.com hugo
 #
 # Behavior (Option 1 only for Hugo):
 # - hugo: creates /var/www/<domain>/public only. You build locally and upload artifacts.
@@ -12,7 +11,6 @@
 set -euo pipefail
 trap 'echo "ERROR: create-site failed at line $LINENO" >&2' ERR
 
-# ---- Config -------------------------------------------------------------------
 SITES_DIR="/var/www"
 CADDYFILE="/etc/caddy/Caddyfile"
 PHP_SOCK="/run/php/php8.2-fpm.sock"
@@ -20,11 +18,7 @@ LOG_DIR="/var/log/caddy"
 WWW_USER="www-data"
 WWW_GROUP="www-data"
 
-usage() {
-  echo "Usage: $0 domain.com [grav|hugo]"
-  echo "Default type is hugo."
-  exit 1
-}
+usage() { echo "Usage: $0 domain.com [grav|hugo]"; exit 1; }
 require_root() { [[ $EUID -eq 0 ]] || { echo "Please run as root." >&2; exit 1; }; }
 valid_domain() { [[ "$1" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]]; }
 ensure_dir() { install -d -m "$2" "$1"; }
@@ -66,18 +60,17 @@ if [[ "$TYPE" == "hugo" ]]; then
 EOF
   harden_permissions "$SITEDIR"
 
-  # Caddy block for static site + narrow PHP hook for /form-handler.php
+  # Static site with a narrow PHP hook for the centralized form handler
   cat >>"$CADDYFILE" <<EOF
 
-$DOMAIN {
+$DOMAIN, www.$DOMAIN {
     root * $PUB
     encode gzip zstd
 
     @form path /form-handler.php
     handle @form {
-        # Global handler file lives outside site roots at /var/www/form-handler.php
         root * /var/www
-        php_fastcgi unix//$PHP_SOCK
+        php_fastcgi unix://$PHP_SOCK
     }
 
     file_server
@@ -100,7 +93,6 @@ $DOMAIN {
 EOF
 
 else
-  # Grav per-site install
   ensure_dir "$SITEDIR" 755
   echo "Installing Grav into $SITEDIR ..."
   pushd /tmp >/dev/null
@@ -115,13 +107,21 @@ else
   find "$SITEDIR"/{cache,images,assets,logs,backup} -type d 2>/dev/null | xargs -r chmod 775 || true
   harden_permissions "$SITEDIR"
 
+  # Full PHP site plus the same centralized form handler path
   cat >>"$CADDYFILE" <<EOF
 
-$DOMAIN {
+$DOMAIN, www.$DOMAIN {
     root * $SITEDIR
     encode gzip zstd
+
+    @form path /form-handler.php
+    handle @form {
+        root * /var/www
+        php_fastcgi unix://$PHP_SOCK
+    }
+
     try_files {path} {path}/ /index.php?{query}
-    php_fastcgi unix//$PHP_SOCK
+    php_fastcgi unix://$PHP_SOCK
     file_server
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -147,9 +147,6 @@ reload_caddy
 echo "Site created."
 echo "Domain: $DOMAIN"
 echo "Type: $TYPE"
-if [[ "$TYPE" == "hugo" ]]; then
-  echo "Upload your local build artifacts to: $SITEDIR/public"
-else
-  echo "Grav root: $SITEDIR"
-fi
-echo "Caddy logs: $LOG_DIR/$DOMAIN.log (JSON)"
+echo "Upload Hugo builds to: $SITEDIR/public"
+echo "Grav root (if used):   $SITEDIR"
+echo "Caddy logs:            $LOG_DIR/$DOMAIN.log (JSON)"
